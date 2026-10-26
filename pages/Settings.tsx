@@ -2,9 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   AlertTriangle, Building2, CheckCircle2, Database, Download, HardDrive, KeyRound, LockKeyhole,
-  RefreshCw, Save, ShieldCheck, Sparkles, UserCog, Sparkles as SparklesIcon,
+  RefreshCw, Save, ShieldCheck, Sparkles, UserCog, Sparkles as SparklesIcon, FileCheck2, Mail, UserRound,
 } from 'lucide-react';
-import { CenterSettings, User, UserRole } from '../types';
+import { CenterSettings, DocumentSettings, User, UserRole } from '../types';
 import { dbService, isDemoMode } from '../services/dbService';
 import { hasPermission } from '../services/permissions';
 import {
@@ -14,15 +14,18 @@ import {
   Badge, Field, InlineAlert, PageHeader, SectionCard, Toggle, btnGhost, btnPrimary, btnSecondary,
   cardClass, inputClass,
 } from '../components/ui';
+import { DEFAULT_DOCUMENT_SETTINGS } from '../services/documentTemplates';
+import { getDocumentCapabilities } from '../services/documentService';
 
 interface Props { user: User; }
 
 const BLANK: CenterSettings = {
-  centerName: 'Sinestesya', legalName: 'Sinestesya Salud Integral S.L.', cif: '',
+  centerName: 'Sinestesya', legalName: 'Sinestesya Villarroya S.L.', cif: '',
   address: '', phone: CENTER_PHONE, email: CENTER_EMAIL, web: '',
   schedule: 'Lunes a viernes · 09:00–20:00', adminClinicalAccess: false,
   clinicalAccessJustification: '', retentionYears: 5, aiEnabled: false,
   aiPrivacyReviewed: false, lastBackupAt: null,
+  documentSettings: { ...DEFAULT_DOCUMENT_SETTINGS },
 };
 
 const Settings: React.FC<Props> = ({ user }) => {
@@ -34,6 +37,7 @@ const Settings: React.FC<Props> = ({ user }) => {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [capabilities, setCapabilities] = useState<Awaited<ReturnType<typeof getDocumentCapabilities>> | null>(null);
 
   const supabaseUrl = import.meta.env?.VITE_SUPABASE_URL as string | undefined;
 
@@ -42,9 +46,14 @@ const Settings: React.FC<Props> = ({ user }) => {
     setError('');
     try {
       const [cfg, profs] = await Promise.all([dbService.getSettings(), dbService.getProfessionals()]);
-      setSettings(cfg);
-      setOriginal(cfg);
+      const normalized: CenterSettings = {
+        ...cfg,
+        documentSettings: { ...DEFAULT_DOCUMENT_SETTINGS, ...(cfg.documentSettings || {}) },
+      };
+      setSettings(normalized);
+      setOriginal(normalized);
       setProfessionals(profs);
+      getDocumentCapabilities().then(setCapabilities).catch(() => setCapabilities(null));
     } catch (e: any) {
       setError(e?.message || 'No se pudo cargar la configuración.');
     } finally {
@@ -55,6 +64,34 @@ const Settings: React.FC<Props> = ({ user }) => {
   useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
 
   const set = (patch: Partial<CenterSettings>) => setSettings(prev => ({ ...prev, ...patch }));
+
+  const docSettings: DocumentSettings = {
+    ...DEFAULT_DOCUMENT_SETTINGS,
+    ...(settings.documentSettings || {}),
+  };
+  // En producción el proveedor y el nivel efectivo los fija el servidor. La
+  // interfaz no puede convertir una firma simple en avanzada ni al contrario.
+  const providerLocked = !isDemoMode;
+  const effectiveProvider: DocumentSettings['signatureProvider'] =
+    capabilities?.assurance === 'demo_sin_validez' ? 'demo'
+      : ['avanzada_proveedor', 'cualificada_proveedor', 'firma_manual_externa'].includes(capabilities?.assurance || '')
+        ? 'external'
+        : 'local_otp';
+  const setDoc = (patch: Partial<DocumentSettings>) =>
+    setSettings(prev => ({
+      ...prev,
+      documentSettings: { ...DEFAULT_DOCUMENT_SETTINGS, ...(prev.documentSettings || {}), ...patch },
+    }));
+
+  const changeProvider = (provider: DocumentSettings['signatureProvider']) => {
+    if (provider === 'demo') {
+      setDoc({ signatureProvider: provider, signatureProviderLabel: 'Demostración local (sin validez)', signatureLevel: 'demo_sin_validez' });
+    } else if (provider === 'local_otp') {
+      setDoc({ signatureProvider: provider, signatureProviderLabel: 'OTP local · firma electrónica simple verificada', signatureLevel: 'simple_verificada_otp' });
+    } else {
+      setDoc({ signatureProvider: provider });
+    }
+  };
 
   const adminsWithClinicalAccess = useMemo(
     () => professionals.filter(p => p.role === UserRole.ADMIN && hasPermission(p, 'clinical.view.all')),
@@ -75,13 +112,40 @@ const Settings: React.FC<Props> = ({ user }) => {
       setError('No se puede activar la IA clínica sin completar antes la evaluación de privacidad.'); return;
     }
     if (settings.retentionYears < 1) { setError('La retención debe ser al menos de un año.'); return; }
+    if (docSettings.dpoEmail && !/^\S+@\S+\.\S+$/.test(docSettings.dpoEmail)) { setError('El correo del DPO no es válido.'); return; }
+    if (docSettings.privacyEmail && !/^\S+@\S+\.\S+$/.test(docSettings.privacyEmail)) { setError('El correo de privacidad no es válido.'); return; }
+    if (docSettings.emailFrom && !/^\S+@\S+\.\S+$/.test(docSettings.emailFrom)) { setError('El remitente de correo no es válido.'); return; }
+    if (docSettings.linkTtlHours < 1 || docSettings.linkTtlHours > 168) { setError('La caducidad del enlace debe estar entre 1 y 168 horas.'); return; }
+    if (docSettings.otpTtlMinutes < 1 || docSettings.otpTtlMinutes > 30) { setError('La caducidad del OTP debe estar entre 1 y 30 minutos.'); return; }
+    if (docSettings.otpMaxAttempts < 1 || docSettings.otpMaxAttempts > 10) { setError('Los intentos OTP deben estar entre 1 y 10.'); return; }
+    if (!providerLocked && docSettings.signatureProvider === 'external' && !docSettings.signatureProviderLabel.trim()) {
+      setError('Indica el nombre del proveedor de firma externo.'); return;
+    }
     setSaving(true);
     try {
+      const effectiveLevel: DocumentSettings['signatureLevel'] =
+        providerLocked && capabilities?.assurance ? capabilities.assurance
+          : docSettings.signatureProvider === 'demo' ? 'demo_sin_validez'
+            : docSettings.signatureProvider === 'local_otp' ? 'simple_verificada_otp'
+              : ['avanzada_proveedor', 'cualificada_proveedor'].includes(docSettings.signatureLevel)
+                ? docSettings.signatureLevel
+                : 'avanzada_proveedor';
       const next: CenterSettings = {
         ...settings,
         aiEnabled: settings.aiPrivacyReviewed ? settings.aiEnabled : false,
         centerName: settings.centerName.trim(),
         email: settings.email.trim(),
+        documentSettings: {
+          ...docSettings,
+          signatureLevel: effectiveLevel,
+          dpoName: docSettings.dpoName.trim(),
+          dpoEmail: docSettings.dpoEmail.trim(),
+          privacyEmail: docSettings.privacyEmail.trim(),
+          emailFrom: docSettings.emailFrom.trim(),
+          signatureProviderLabel: docSettings.signatureProviderLabel.trim(),
+          privacyNoticeVersion: docSettings.privacyNoticeVersion.trim(),
+          requireLegalReview: true,
+        },
       };
       const ok = await dbService.saveSettings(next, user);
       if (!ok) throw new Error('No se pudo guardar la configuración.');
@@ -244,6 +308,134 @@ const Settings: React.FC<Props> = ({ user }) => {
                 Esta configuración es una ayuda operativa, no asesoramiento jurídico. Valida el periodo de conservación
                 y la información al paciente con tu delegado de protección de datos.
               </p>
+            </SectionCard>
+
+            <SectionCard title="Delegado de protección de datos y documentación firmada" description="DPO, remitente, proveedor de firma y caducidad de enlaces">
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <Field label="Delegado de Protección de Datos (DPO)">
+                    <input className={inputClass} value={docSettings.dpoName} onChange={e => setDoc({ dpoName: e.target.value })} placeholder="Nombre y apellidos" />
+                  </Field>
+                  <Field label="Correo del DPO">
+                    <input type="email" className={inputClass} value={docSettings.dpoEmail} onChange={e => setDoc({ dpoEmail: e.target.value })} placeholder="dpo@…" />
+                  </Field>
+                  <Field label="Correo para derechos y privacidad">
+                    <input type="email" className={inputClass} value={docSettings.privacyEmail} onChange={e => setDoc({ privacyEmail: e.target.value })} placeholder="privacidad@…" />
+                  </Field>
+                  <Field label="Remitente de los correos de firma">
+                    <input type="email" className={inputClass} value={docSettings.emailFrom} onChange={e => setDoc({ emailFrom: e.target.value })} placeholder="documentos@…" />
+                  </Field>
+                  <Field label="Versión de la política de privacidad">
+                    <input className={inputClass} value={docSettings.privacyNoticeVersion} onChange={e => setDoc({ privacyNoticeVersion: e.target.value })} />
+                  </Field>
+                  <Field label="Última revisión legal registrada">
+                    <input
+                      type="date"
+                      className={inputClass}
+                      value={docSettings.lastLegalReviewAt ? docSettings.lastLegalReviewAt.slice(0, 10) : ''}
+                      onChange={e => setDoc({ lastLegalReviewAt: e.target.value ? new Date(`${e.target.value}T12:00:00`).toISOString() : null })}
+                    />
+                  </Field>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <Field
+                    label="Proveedor de firma (servidor)"
+                    hint={providerLocked
+                      ? 'Se fija con SIGNATURE_PROVIDER en el servidor. La interfaz solo muestra el estado efectivo.'
+                      : 'Modo local de demostración. En producción el servidor fija el proveedor.'}
+                  >
+                    <select
+                      className={inputClass}
+                      value={providerLocked ? effectiveProvider : docSettings.signatureProvider}
+                      onChange={e => changeProvider(e.target.value as DocumentSettings['signatureProvider'])}
+                      disabled={providerLocked}
+                    >
+                      <option value="local_otp">OTP local · firma simple verificada</option>
+                      <option value="external">Proveedor externo (pendiente de integración)</option>
+                      <option value="demo">Demostración sin validez</option>
+                    </select>
+                  </Field>
+                  <Field label="Nombre visible del proveedor" hint={providerLocked ? 'Configurado en el servidor.' : undefined}>
+                    <input
+                      className={inputClass}
+                      value={docSettings.signatureProviderLabel}
+                      onChange={e => setDoc({ signatureProviderLabel: e.target.value })}
+                      disabled={providerLocked}
+                    />
+                  </Field>
+                  <Field
+                    label="Nivel de firma declarado"
+                    hint={providerLocked ? 'El nivel efectivo solo puede acreditarlo el proveedor configurado en el servidor.' : 'No declares un nivel que el proveedor no pueda acreditar.'}
+                  >
+                    <select
+                      className={inputClass}
+                      value={providerLocked
+                        ? (capabilities?.assurance || 'simple_verificada_otp')
+                        : docSettings.signatureProvider === 'demo' ? 'demo_sin_validez' : docSettings.signatureProvider === 'local_otp' ? 'simple_verificada_otp' : docSettings.signatureLevel}
+                      onChange={e => setDoc({ signatureLevel: e.target.value as DocumentSettings['signatureLevel'] })}
+                      disabled={providerLocked || docSettings.signatureProvider !== 'external'}
+                    >
+                      <option value="demo_sin_validez">Demo · sin validez</option>
+                      <option value="simple_verificada_otp">Electrónica simple verificada por OTP</option>
+                      <option value="avanzada_proveedor">Electrónica avanzada del proveedor</option>
+                      <option value="cualificada_proveedor">Electrónica cualificada del proveedor</option>
+                      <option value="firma_manual_externa">Firma manual externa</option>
+                    </select>
+                  </Field>
+                  <Field label="Caducidad del enlace (horas)">
+                    <input type="number" min={1} max={168} className={inputClass} value={docSettings.linkTtlHours} onChange={e => setDoc({ linkTtlHours: Number(e.target.value) })} />
+                  </Field>
+                  <Field label="Caducidad del OTP (minutos)">
+                    <input type="number" min={1} max={30} className={inputClass} value={docSettings.otpTtlMinutes} onChange={e => setDoc({ otpTtlMinutes: Number(e.target.value) })} />
+                  </Field>
+                  <Field label="Intentos OTP permitidos">
+                    <input type="number" min={1} max={10} className={inputClass} value={docSettings.otpMaxAttempts} onChange={e => setDoc({ otpMaxAttempts: Number(e.target.value) })} />
+                  </Field>
+                </div>
+
+                <div className="rounded-xl border border-stone-200 p-3">
+                  <Toggle
+                    checked
+                    onChange={() => undefined}
+                    disabled
+                    label="Revisión legal obligatoria antes de enviar"
+                    description="No se puede desactivar: el profesional debe revisar la versión exacta y el sistema registra esa confirmación."
+                  />
+                </div>
+
+                <Field label="Notas internas de privacidad y firma">
+                  <textarea className={inputClass + ' min-h-[70px]'} value={docSettings.notes || ''} onChange={e => setDoc({ notes: e.target.value })} placeholder="Contrato de encargado, evaluación de impacto, limitaciones conocidas…" />
+                </Field>
+
+                {capabilities && (
+                  <div className={`rounded-xl border p-3 text-[11px] leading-relaxed ${
+                    capabilities.providerConfigured && capabilities.emailConfigured
+                      ? 'border-fisio-200 bg-fisio-50 text-fisio-900'
+                      : 'border-amber-200 bg-amber-50 text-amber-900'
+                  }`}>
+                    <p className="font-semibold">Estado real comprobado por el servidor</p>
+                    <p className="mt-1">Proveedor: {capabilities.providerLabel} · Correo: {capabilities.emailConfigured ? 'configurado' : 'no configurado'} · Nivel efectivo: {capabilities.assurance}</p>
+                    {capabilities.warnings.map(warning => <p key={warning} className="mt-1">· {warning}</p>)}
+                  </div>
+                )}
+
+                {docSettings.signatureProvider === 'external' && (
+                  <InlineAlert level="warning" title="Integración externa no implementada">
+                    El adaptador de proveedor externo todavía no está conectado. Los envíos fallarán de forma segura en lugar de simular una firma avanzada o cualificada. Configura un proveedor real y valida su certificado antes de producción.
+                  </InlineAlert>
+                )}
+                {docSettings.signatureProvider === 'demo' && !isDemoMode && (
+                  <InlineAlert level="danger" title="Demo en producción">
+                    La firma demo no tiene validez jurídica y el servidor solo la permite con ALLOW_DEMO_SIGNING=true. No debe usarse con pacientes reales.
+                  </InlineAlert>
+                )}
+                {!docSettings.dpoName && (
+                  <InlineAlert level="info" title="DPO sin designar">
+                    Designa y publica los datos del DPO o del responsable de privacidad antes de usar el módulo con pacientes reales.
+                  </InlineAlert>
+                )}
+              </div>
             </SectionCard>
 
             <SectionCard title="Inteligencia artificial clínica" description="Desactivada por defecto hasta superar la evaluación de privacidad">

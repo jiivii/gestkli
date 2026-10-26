@@ -10,7 +10,7 @@ export { ACCOUNTING_SQL, SINESTESYA_SQL };
 
 export const CENTER_NAME = 'Sinestesya';
 export const CENTER_TAGLINE = 'Salud integral';
-export const CENTER_LEGAL_NAME = 'Sinestesya Salud Integral S.L.';
+export const CENTER_LEGAL_NAME = 'Sinestesya Villarroya S.L.';
 export const CENTER_EMAIL = 'hola@sinestesya.es';
 export const CENTER_PHONE = '+34 900 000 000';
 

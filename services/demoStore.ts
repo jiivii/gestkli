@@ -1,9 +1,13 @@
 import {
   Appointment, AppointmentStatus, AuditEntry, CashClosing, CenterSettings, ChatMessage, ChatRoom,
-  ClinicalRecord, ConsentRecord, Expense, Invoice, MedicalHistoryEntry, Patient, Payment,
-  ReservationRequest, Service, SessionPackage, User, UserRole, Notification,
+  ClinicalRecord, ConsentRecord, DocumentEvent, DocumentSignatureRequest, DocumentTemplate, Expense,
+  Invoice, MedicalHistoryEntry, Patient, PatientDocument, Payment, ReservationRequest, Service,
+  SessionPackage, User, UserRole, Notification,
 } from '../types';
 import { CLINICAL_SPECIALTIES } from '../constants';
+import {
+  INITIAL_DOCUMENT_TEMPLATES, buildAutoValues, renderTemplate,
+} from './documentTemplates';
 
 // ============================================================
 //  Almacén local de DEMOSTRACIÓN
@@ -39,6 +43,10 @@ export interface DemoState {
   packages: SessionPackage[];
   cashClosings: CashClosing[];
   consents: ConsentRecord[];
+  documentTemplates: DocumentTemplate[];
+  patientDocuments: PatientDocument[];
+  documentEvents: DocumentEvent[];
+  documentSignatureRequests: DocumentSignatureRequest[];
   audit: AuditEntry[];
   reservations: ReservationRequest[];
   notifications: Notification[];
@@ -109,6 +117,12 @@ const PATIENTS: Patient[] = [
       name: 'Marta Costa Ferrer', dni: '44889112P', phone: '677 881 220',
       email: 'familia.martin@example.com', relationship: 'Madre',
     },
+    secondaryLegalGuardian: {
+      name: 'Joan Martín Oliver', dni: '44990221Q', phone: '677 881 221',
+      email: 'joan.martin@example.com', relationship: 'Padre',
+    },
+    representationType: 'patria_potestad_conjunta' as const,
+    guardianshipNotes: 'Patria potestad compartida. Se recomienda recabar la conformidad de ambos progenitores en actuaciones que lo requieran.',
     assignedSpecialties: [UserRole.LOGOPEDIA, UserRole.PSICOLOGIA], demo: true,
   },
   {
@@ -137,6 +151,8 @@ const PATIENTS: Patient[] = [
       name: 'Ana Serrano Gil', dni: '44556677J', phone: '688 002 119',
       email: 'familia.lopez@example.com', relationship: 'Madre',
     },
+    representationType: 'patria_potestad_exclusiva' as const,
+    guardianshipNotes: 'Consta patria potestad exclusiva de la madre. Revisar documentación acreditativa.',
     assignedSpecialties: [UserRole.NUTRICION], demo: true,
   },
   {
@@ -721,7 +737,7 @@ const CHAT_MESSAGES: ChatMessage[] = [
 
 const SETTINGS: CenterSettings = {
   centerName: 'Sinestesya',
-  legalName: 'Sinestesya Salud Integral S.L.',
+  legalName: 'Sinestesya Villarroya S.L.',
   cif: 'B-00000000',
   address: 'C/ Ejemplo 1, Valencia',
   phone: '+34 900 000 000',
@@ -734,9 +750,197 @@ const SETTINGS: CenterSettings = {
   aiEnabled: false,
   aiPrivacyReviewed: false,
   lastBackupAt: dateAt(-1, 22, 0),
+  documentSettings: {
+    dpoName: 'Delegado de Protección de Datos (demo)',
+    dpoEmail: 'dpo@sinestesya.es',
+    privacyEmail: 'privacidad@sinestesya.es',
+    emailFrom: '',
+    signatureProvider: 'demo',
+    signatureProviderLabel: 'Entorno local de demostración',
+    signatureLevel: 'demo_sin_validez',
+    linkTtlHours: 72,
+    otpTtlMinutes: 10,
+    otpMaxAttempts: 5,
+    requireLegalReview: true,
+    lastLegalReviewAt: null,
+    privacyNoticeVersion: '1.0-demo',
+    notes: 'La firma del modo demo no tiene validez jurídica. Para producción se debe integrar un proveedor de firma electrónica y revisar los textos legalmente.',
+  },
 };
 
-const buildInitialState = (): DemoState => ({
+const DEMO_HASH_A = '8f1c0d5f6e6b40c3a8c7e1d4b8f29a0c6e4d2b7a9c1f3e5d7b0a2c4e6f8a1b3d';
+const DEMO_HASH_B = '4a7c2e9d1b6f8a3c5e0d7b2f9a4c6e8d0b3f5a7c9e1d2b4f6a8c0e2d4b6f8a1c';
+
+const cloneTemplates = (): DocumentTemplate[] =>
+  INITIAL_DOCUMENT_TEMPLATES.map(t => ({ ...t, fields: t.fields.map(f => ({ ...f })) }));
+
+const buildDemoDocumentation = (templates: DocumentTemplate[]) => {
+  const templateById = (id: string) => templates.find(t => t.id === id)!;
+  const patientById = (id: string) => PATIENTS.find(p => p.id === id)!;
+  const professionalById = (id: string) => USERS.find(u => u.id === id)!;
+
+  const makeDocument = (
+    id: string,
+    templateId: string,
+    patientId: string,
+    professionalId: string,
+    manualValues: Record<string, any>,
+    overrides: Partial<PatientDocument>,
+  ): PatientDocument => {
+    const template = templateById(templateId);
+    const patient = patientById(patientId);
+    const professional = professionalById(professionalId);
+    const autoValues = buildAutoValues({
+      patient, professional, center: SETTINGS, serviceName: '', documentVersion: 1,
+    });
+    const rendered = renderTemplate(template, { ...autoValues, ...manualValues });
+    return {
+      id, patientId, templateId, templateName: template.name, templateVersion: template.version,
+      category: template.category, specialty: template.specialty || null,
+      professionalId, professionalName: professional.name, title: template.name,
+      status: 'borrador', version: 1, isCurrent: true,
+      fields: manualValues, patientSnapshot: autoValues, professionalSnapshot: {
+        name: professional.name, email: professional.email, phone: professional.phone || '',
+      }, centerSnapshot: {
+        centerName: SETTINGS.centerName, legalName: SETTINGS.legalName, cif: SETTINGS.cif,
+        address: SETTINGS.address, phone: SETTINGS.phone, email: SETTINGS.email,
+      }, renderedText: rendered.text, contentSha256: '',
+      signers: [], requiredSignatures: template.requiresSignature ? 1 : 0, signedCount: 0,
+      signatureAssurance: null, signatureProvider: 'demo',
+      createdBy: 'u-admin', createdByName: 'Laura Méndez',
+      createdAt: dateAt(-10, 11, 0), updatedAt: dateAt(-10, 11, 0), demo: true,
+      ...overrides,
+    };
+  };
+
+  const signed = makeDocument('doc-demo-psi-elena', 'tpl-psi-consentimiento', 'p-elena', 'u-psi', {
+    reason: 'Seguimiento de ansiedad y dificultades de regulación emocional.',
+    approach: 'Entrevista, psicoeducación y técnicas cognitivo-conductuales con revisión periódica.',
+    risks: 'Malestar emocional transitorio al abordar contenidos sensibles; no se identifican riesgos graves.',
+    alternatives: 'Otras orientaciones psicoterapéuticas o derivación a otro profesional.',
+    teleconsult: false,
+  }, {
+    status: 'firmado', sentAt: dateAt(-7, 17, 0), viewedAt: dateAt(-6, 9, 20),
+    signedAt: dateAt(-5, 18, 10), archivedAt: dateAt(-5, 18, 12),
+    signatureAssurance: 'demo_sin_validez', signatureProvider: 'Entorno local de demostración',
+    signedPdfSha256: DEMO_HASH_B,
+    signers: [{
+      id: 'sig-demo-elena', name: 'Elena Ruiz García', email: 'elena.ruiz@example.com',
+      condition: 'paciente', required: true, status: 'firmado',
+      sentAt: dateAt(-7, 17, 0), signedAt: dateAt(-5, 18, 10),
+      verificationMethod: 'Demostración: OTP local + enlace de un solo uso',
+      assurance: 'demo_sin_validez', authorityConfirmed: true,
+      evidence: { demo: true, note: 'Evidencia simulada en el entorno de demostración.' },
+    }],
+    requiredSignatures: 1, signedCount: 1,
+    evidence: {
+      sha256: DEMO_HASH_A, signedSha256: DEMO_HASH_B, signedAt: dateAt(-5, 18, 10),
+      signedByName: 'Elena Ruiz García', signedByCondition: 'paciente',
+      verificationMethod: 'OTP local + enlace de un solo uso (demo)', assurance: 'demo_sin_validez',
+      provider: 'Entorno local de demostración', integrityVerified: true,
+      certificateInfo: { demo: true, notQualified: true },
+    },
+    createdAt: dateAt(-8, 10, 0), updatedAt: dateAt(-5, 18, 12),
+  });
+
+  const pending = makeDocument('doc-demo-menor-pau', 'tpl-menor-representacion', 'p-pau', 'u-logo', {
+    representationDocument: 'Libro de familia',
+    authorityScope: 'Patria potestad compartida. Se solicita conformidad de ambos progenitores para la intervención logopédica.',
+    minorInfo: 'Se ha explicado a Pau, en lenguaje adaptado, en qué consiste la intervención y que puede preguntar dudas.',
+    assent: 'Sí, documentado',
+    disagreement: '',
+  }, {
+    status: 'pendiente_firma', sentAt: dateAt(-1, 12, 0), expiresAt: dateAt(2, 12, 0),
+    signers: [
+      {
+        id: 'sig-demo-marta', name: 'Marta Costa Ferrer', email: 'familia.martin@example.com',
+        condition: 'representante_legal', required: true, status: 'enviado',
+        sentAt: dateAt(-1, 12, 0), verificationMethod: 'OTP local + enlace de un solo uso',
+        assurance: 'demo_sin_validez', authorityConfirmed: false,
+      },
+      {
+        id: 'sig-demo-joan', name: 'Joan Martín Oliver', email: 'joan.martin@example.com',
+        condition: 'representante_legal_2', required: true, status: 'enviado',
+        sentAt: dateAt(-1, 12, 2), verificationMethod: 'OTP local + enlace de un solo uso',
+        assurance: 'demo_sin_validez', authorityConfirmed: false,
+      },
+    ],
+    requiredSignatures: 2, signedCount: 0, signatureAssurance: 'demo_sin_validez',
+    createdAt: dateAt(-2, 9, 30), updatedAt: dateAt(-1, 12, 2),
+  });
+
+  const draft = makeDocument('doc-demo-info-hugo', 'tpl-info-privacidad', 'p-hugo', 'u-nutri', {
+    deliveryChannel: 'Presencial',
+    identityCheck: true,
+    questionsAnswered: true,
+  }, {
+    status: 'borrador', requiredSignatures: 0, signatureProvider: 'demo',
+    createdAt: dateAt(-1, 10, 15), updatedAt: dateAt(-1, 10, 15),
+  });
+
+  const events: DocumentEvent[] = [
+    {
+      id: 'de-1', documentId: signed.id, patientId: signed.patientId, type: 'created',
+      actorId: 'u-psi', actorName: 'Daniel Ferrer', actorType: 'usuario',
+      detail: 'Documento generado desde la plantilla de consentimiento psicológico.',
+      createdAt: dateAt(-8, 10, 0), demo: true,
+    },
+    {
+      id: 'de-2', documentId: signed.id, patientId: signed.patientId, type: 'sent',
+      actorId: 'u-psi', actorName: 'Daniel Ferrer', actorType: 'usuario',
+      detail: 'Enlace de firma enviado al paciente (simulación demo).',
+      createdAt: dateAt(-7, 17, 0), demo: true,
+    },
+    {
+      id: 'de-3', documentId: signed.id, patientId: signed.patientId, type: 'accessed',
+      actorName: 'Elena Ruiz García', actorType: 'firmante',
+      detail: 'Acceso al documento tras verificación OTP (demo).',
+      createdAt: dateAt(-6, 9, 20), demo: true,
+    },
+    {
+      id: 'de-4', documentId: signed.id, patientId: signed.patientId, type: 'signed',
+      actorName: 'Elena Ruiz García', actorType: 'firmante',
+      detail: 'Firma registrada y archivo final generado (demo).',
+      createdAt: dateAt(-5, 18, 10), demo: true,
+    },
+    {
+      id: 'de-5', documentId: signed.id, patientId: signed.patientId, type: 'archived',
+      actorName: 'Sistema', actorType: 'sistema',
+      detail: 'Documento firmado archivado en el expediente del paciente (demo).',
+      createdAt: dateAt(-5, 18, 12), demo: true,
+    },
+    {
+      id: 'de-6', documentId: pending.id, patientId: pending.patientId, type: 'created',
+      actorId: 'u-logo', actorName: 'Irene Navarro', actorType: 'usuario',
+      detail: 'Documento de representación legal generado para dos firmantes.',
+      createdAt: dateAt(-2, 9, 30), demo: true,
+    },
+    {
+      id: 'de-7', documentId: pending.id, patientId: pending.patientId, type: 'sent',
+      actorId: 'u-logo', actorName: 'Irene Navarro', actorType: 'usuario',
+      detail: 'Enlaces enviados a los dos representantes legales (simulación demo).',
+      createdAt: dateAt(-1, 12, 0), demo: true,
+    },
+    {
+      id: 'de-8', documentId: draft.id, patientId: draft.patientId, type: 'created',
+      actorId: 'u-nutri', actorName: 'Clara Vidal', actorType: 'usuario',
+      detail: 'Información de privacidad generada en borrador.',
+      createdAt: dateAt(-1, 10, 15), demo: true,
+    },
+  ];
+
+  return {
+    documents: [signed, pending, draft],
+    events,
+    requests: [] as DocumentSignatureRequest[],
+  };
+};
+
+
+const buildInitialState = (): DemoState => {
+  const documentTemplates = cloneTemplates();
+  const documentation = buildDemoDocumentation(documentTemplates);
+  return {
   users: USERS,
   patients: PATIENTS,
   assignments: ASSIGNMENTS,
@@ -766,13 +970,18 @@ const buildInitialState = (): DemoState => ({
   packages: PACKAGES,
   cashClosings: [],
   consents: CONSENTS,
+  documentTemplates,
+  patientDocuments: documentation.documents,
+  documentEvents: documentation.events,
+  documentSignatureRequests: documentation.requests,
   audit: AUDIT,
   reservations: RESERVATIONS,
   notifications: [],
   settings: SETTINGS,
   chatRooms: CHAT_ROOMS,
   chatMessages: CHAT_MESSAGES,
-});
+  };
+};
 
 export const getDemoState = (): DemoState => {
   try {
@@ -785,7 +994,22 @@ export const getDemoState = (): DemoState => {
     const parsed = JSON.parse(raw) as DemoState;
     // Migración defensiva si faltan claves nuevas
     const initial = buildInitialState();
-    return { ...initial, ...parsed };
+    return {
+      ...initial,
+      ...parsed,
+      documentTemplates: parsed.documentTemplates?.length ? parsed.documentTemplates : initial.documentTemplates,
+      patientDocuments: parsed.patientDocuments || initial.patientDocuments,
+      documentEvents: parsed.documentEvents || initial.documentEvents,
+      documentSignatureRequests: parsed.documentSignatureRequests || initial.documentSignatureRequests,
+      settings: {
+        ...initial.settings,
+        ...(parsed.settings || {}),
+        documentSettings: {
+          ...initial.settings.documentSettings!,
+          ...((parsed.settings || {}).documentSettings || {}),
+        },
+      },
+    };
   } catch {
     const initial = buildInitialState();
     try { localStorage.setItem(DEMO_STORAGE_KEY, JSON.stringify(initial)); } catch { /* noop */ }

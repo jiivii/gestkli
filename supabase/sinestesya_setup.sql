@@ -1101,3 +1101,462 @@ create trigger on_auth_user_created
 -- ============================================================
 --  FIN DEL ESQUEMA SINESTESYA
 -- ============================================================
+
+-- ============================================================
+-- 15. DOCUMENTACI�N LEGAL, CONSENTIMIENTOS Y FIRMA ELECTR�NICA
+-- ============================================================
+-- Este bloque es idempotente. Antes de producci�n:
+--   � Revisa los textos de las plantillas con el DPO/asesor jur�dico.
+--   � Crea el bucket privado patient-documents (lo intenta este script).
+--   � Configura RESEND_API_KEY, DOCUMENT_EMAIL_FROM y DOCUMENT_PUBLIC_URL.
+--   � No uses la firma demo en producci�n. La firma OTP es simple
+--     verificada; para avanzada/cualificada integra un proveedor eIDAS.
+
+alter table public.patients add column if not exists secondary_legal_guardian_name text;
+alter table public.patients add column if not exists secondary_legal_guardian_dni text;
+alter table public.patients add column if not exists secondary_legal_guardian_phone text;
+alter table public.patients add column if not exists secondary_legal_guardian_email text;
+alter table public.patients add column if not exists secondary_legal_guardian_relationship text;
+alter table public.patients add column if not exists representation_type text;
+alter table public.patients add column if not exists guardianship_notes text;
+
+alter table public.center_settings add column if not exists document_settings jsonb not null default '{}'::jsonb;
+update public.center_settings
+set document_settings = coalesce(document_settings, '{}'::jsonb) || jsonb_build_object(
+  'signatureProvider', 'local_otp',
+  'signatureProviderLabel', 'Firma electrónica simple verificada por OTP',
+  'signatureLevel', 'simple_verificada_otp',
+  'linkTtlHours', 72,
+  'otpTtlMinutes', 10,
+  'otpMaxAttempts', 5,
+  'requireLegalReview', true,
+  'privacyNoticeVersion', '1.0'
+)
+where id = 1 and (document_settings is null or document_settings = '{}'::jsonb);
+
+-- Migración segura del default antiguo: el adaptador externo no está
+-- implementado y debía fallar con 503. Solo se normaliza el valor de fábrica,
+-- no una elección explícita de otro proveedor.
+update public.center_settings
+set document_settings = document_settings || jsonb_build_object(
+  'signatureProvider', 'local_otp',
+  'signatureProviderLabel', 'Firma electrónica simple verificada por OTP',
+  'signatureLevel', 'simple_verificada_otp'
+)
+where id = 1
+  and document_settings->>'signatureProvider' = 'external'
+  and document_settings->>'signatureProviderLabel' = 'Proveedor externo pendiente de configurar'
+  and document_settings->>'signatureLevel' = 'avanzada_proveedor';
+
+-- ------------------------------------------------------------
+-- 15.1 Permisos documentales (base por rol + extras del perfil)
+-- ------------------------------------------------------------
+create or replace function public.has_app_permission(p_permission text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.profiles p
+    where p.id = auth.uid()
+      and p.active is not false
+      and (
+        case
+          when p.role = 'admin' then p_permission in ('documents.view', 'documents.manage', 'documents.templates.manage')
+          when p.role in ('fisioterapia', 'nutricion', 'logopedia', 'psicologia')
+            then p_permission in ('documents.view', 'documents.manage')
+          else false
+        end
+        or coalesce(p.permissions ? p_permission, false)
+      )
+  );
+$$;
+
+-- Permite leer documentos administrativos/transversales a quien tenga
+-- documents.view. Los documentos cl�nicos exigen, adem�s, asignaci�n y
+-- especialidad, o clinical.view.all en el caso de administraci�n.
+create or replace function public.can_access_patient_document(
+  p_patient_id uuid,
+  p_specialty text,
+  p_category text
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select public.has_app_permission('documents.view')
+    and exists (
+      select 1
+      from public.profiles me
+      where me.id = auth.uid()
+        and me.active is not false
+        and (
+          (
+            me.role = 'admin'
+            and (
+              (
+                coalesce(p_specialty, '') = ''
+                and coalesce(p_category, '') not in ('psicologia', 'fisioterapia', 'nutricion', 'logopedia', 'menores')
+              )
+              or public.has_permission('clinical.view.all')
+            )
+          )
+          or (
+            me.role in ('fisioterapia', 'nutricion', 'logopedia', 'psicologia')
+            and public.is_assigned_to_patient(p_patient_id)
+            and (
+              coalesce(p_specialty, '') = ''
+              or p_specialty in (me.role, coalesce(me.profession, ''))
+            )
+          )
+        )
+    );
+$$;
+
+create or replace function public.can_access_document_id(p_document_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.patient_documents d
+    where d.id = p_document_id
+      and public.can_access_patient_document(d.patient_id, d.specialty, d.category)
+  );
+$$;
+
+-- ------------------------------------------------------------
+-- 15.2 Plantillas versionables
+-- ------------------------------------------------------------
+create table if not exists public.document_templates (
+  id text primary key,
+  name text not null,
+  category text not null default 'general',
+  specialty text,
+  description text not null default '',
+  body text not null default '',
+  fields jsonb not null default '[]'::jsonb,
+  version integer not null default 1,
+  active boolean not null default true,
+  legal_status text not null default 'pendiente_revision',
+  legal_reviewed_by text,
+  legal_reviewed_at timestamptz,
+  legal_review_notes text,
+  requires_signature boolean not null default true,
+  signer_rule text not null default 'manual',
+  validity_days integer,
+  required boolean not null default false,
+  created_by uuid references public.profiles (id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.document_templates add column if not exists active boolean not null default true;
+alter table public.document_templates add column if not exists legal_status text not null default 'pendiente_revision';
+alter table public.document_templates add column if not exists required boolean not null default false;
+
+create index if not exists document_templates_category_idx on public.document_templates (category, specialty, active);
+
+-- ------------------------------------------------------------
+-- 15.3 Documentos del paciente (snapshot inmutable)
+-- ------------------------------------------------------------
+create table if not exists public.patient_documents (
+  id uuid primary key default gen_random_uuid(),
+  patient_id uuid not null references public.patients (id) on delete cascade,
+  template_id text references public.document_templates (id) on delete set null,
+  template_name text not null default '',
+  template_version integer not null default 1,
+  category text not null default 'general',
+  specialty text,
+  professional_id uuid references public.profiles (id) on delete set null,
+  professional_name text,
+  service_id text,
+  service_name text,
+  appointment_id uuid,
+  title text not null default 'Documento',
+  status text not null default 'borrador',
+  version integer not null default 1,
+  is_current boolean not null default true,
+  replaces_document_id uuid references public.patient_documents (id) on delete set null,
+  replaced_by_document_id uuid references public.patient_documents (id) on delete set null,
+  fields jsonb not null default '{}'::jsonb,
+  patient_snapshot jsonb not null default '{}'::jsonb,
+  professional_snapshot jsonb not null default '{}'::jsonb,
+  center_snapshot jsonb not null default '{}'::jsonb,
+  rendered_text text not null default '',
+  content_sha256 text not null default '',
+  signers jsonb not null default '[]'::jsonb,
+  required_signatures integer not null default 0,
+  signed_count integer not null default 0,
+  signature_assurance text,
+  signature_provider text,
+  evidence jsonb,
+  signed_pdf_path text,
+  signed_pdf_sha256 text,
+  generated_pdf_path text,
+  external_upload boolean not null default false,
+  sent_at timestamptz,
+  viewed_at timestamptz,
+  signed_at timestamptz,
+  archived_at timestamptz,
+  expires_at timestamptz,
+  revoked_at timestamptz,
+  revocation_reason text,
+  notes text,
+  created_by uuid references public.profiles (id) on delete set null,
+  created_by_name text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists patient_documents_patient_idx on public.patient_documents (patient_id, created_at desc);
+create index if not exists patient_documents_status_idx on public.patient_documents (patient_id, status, is_current);
+create index if not exists patient_documents_sha_idx on public.patient_documents (content_sha256);
+
+-- ------------------------------------------------------------
+-- 15.4 Peticiones de firma (token/OTP solo como hash)
+-- ------------------------------------------------------------
+create table if not exists public.document_signature_requests (
+  id uuid primary key default gen_random_uuid(),
+  document_id uuid not null references public.patient_documents (id) on delete cascade,
+  patient_id uuid not null references public.patients (id) on delete cascade,
+  signer_id text not null,
+  recipient_name text not null default '',
+  recipient_email text not null,
+  condition text not null,
+  token_hash text not null unique,
+  otp_hash text,
+  otp_expires_at timestamptz,
+  otp_attempts integer not null default 0,
+  otp_last_sent_at timestamptz,
+  verification_hash text,
+  verification_expires_at timestamptz,
+  verified_at timestamptz,
+  status text not null default 'pendiente',
+  expires_at timestamptz not null,
+  sent_at timestamptz not null default now(),
+  sent_count integer not null default 1,
+  opened_at timestamptz,
+  signed_at timestamptz,
+  rejected_at timestamptz,
+  failure_reason text,
+  signed_pdf_path text,
+  signed_pdf_sha256 text,
+  evidence jsonb,
+  created_by uuid references public.profiles (id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists document_requests_document_idx on public.document_signature_requests (document_id, created_at desc);
+create index if not exists document_requests_status_idx on public.document_signature_requests (status, expires_at);
+create index if not exists document_requests_email_idx on public.document_signature_requests (lower(recipient_email));
+
+-- ------------------------------------------------------------
+-- 15.5 Eventos inmutables
+-- ------------------------------------------------------------
+create table if not exists public.document_events (
+  id uuid primary key default gen_random_uuid(),
+  document_id uuid not null references public.patient_documents (id) on delete cascade,
+  patient_id uuid not null references public.patients (id) on delete cascade,
+  request_id uuid references public.document_signature_requests (id) on delete set null,
+  type text not null,
+  actor_id uuid,
+  actor_name text not null default 'Sistema',
+  actor_type text not null default 'sistema',
+  detail text not null default '',
+  metadata jsonb,
+  ip_hint text,
+  user_agent text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists document_events_document_idx on public.document_events (document_id, created_at);
+create index if not exists document_events_patient_idx on public.document_events (patient_id, created_at desc);
+
+-- ------------------------------------------------------------
+-- 15.6 Trigger de protecci�n del documento firmado
+-- ------------------------------------------------------------
+create or replace function public.protect_signed_document()
+returns trigger
+language plpgsql
+as $$
+begin
+  -- No se puede declarar "firmado" sin un PDF final y una huella.
+  if new.status = 'firmado' and (
+    new.signed_at is null
+    or coalesce(new.signed_pdf_path, '') = ''
+    or coalesce(new.signed_pdf_sha256, '') = ''
+  ) then
+    raise exception 'Un documento firmado requiere PDF archivado, fecha y huella SHA-256.';
+  end if;
+
+  if tg_op = 'UPDATE' and (
+    old.signed_at is not null
+    or old.archived_at is not null
+    or coalesce(old.signed_pdf_path, '') <> ''
+  ) then
+    if new.rendered_text is distinct from old.rendered_text
+      or new.content_sha256 is distinct from old.content_sha256
+      or new.template_id is distinct from old.template_id
+      or new.template_version is distinct from old.template_version
+      or new.title is distinct from old.title
+      or new.category is distinct from old.category
+      or new.specialty is distinct from old.specialty
+      or new.patient_id is distinct from old.patient_id
+      or new.fields is distinct from old.fields
+      or new.patient_snapshot is distinct from old.patient_snapshot
+      or new.professional_snapshot is distinct from old.professional_snapshot
+      or new.center_snapshot is distinct from old.center_snapshot
+      or new.signers is distinct from old.signers
+      or new.signed_at is distinct from old.signed_at
+      or new.archived_at is distinct from old.archived_at
+      or new.signed_pdf_path is distinct from old.signed_pdf_path
+      or new.signed_pdf_sha256 is distinct from old.signed_pdf_sha256
+      or new.evidence is distinct from old.evidence
+      or new.signature_assurance is distinct from old.signature_assurance
+    then
+      raise exception 'El documento firmado es inmutable. Crea una nueva versi�n y conserva la anterior.';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists protect_signed_document_trigger on public.patient_documents;
+create trigger protect_signed_document_trigger
+before insert or update on public.patient_documents
+for each row execute function public.protect_signed_document();
+
+-- Los eventos y las solicitudes tampoco se exponen a borrado desde el cliente.
+drop trigger if exists document_events_immutable on public.document_events;
+create or replace function public.document_event_immutable()
+returns trigger language plpgsql as $$
+begin
+  raise exception 'Los eventos documentales son inmutables.';
+end;
+$$;
+create trigger document_events_immutable
+before update or delete on public.document_events
+for each row execute function public.document_event_immutable();
+
+-- ------------------------------------------------------------
+-- 15.7 RLS
+-- ------------------------------------------------------------
+alter table public.document_templates enable row level security;
+alter table public.patient_documents enable row level security;
+alter table public.document_signature_requests enable row level security;
+alter table public.document_events enable row level security;
+
+drop policy if exists document_templates_select on public.document_templates;
+create policy document_templates_select on public.document_templates
+for select to authenticated
+using (
+  (public.has_app_permission('documents.templates.manage'))
+  or (active = true and legal_status = 'aprobada' and public.has_app_permission('documents.view'))
+);
+
+drop policy if exists document_templates_admin_insert on public.document_templates;
+create policy document_templates_admin_insert on public.document_templates
+for insert to authenticated
+with check (public.is_admin() and public.has_app_permission('documents.templates.manage'));
+
+drop policy if exists document_templates_admin_update on public.document_templates;
+create policy document_templates_admin_update on public.document_templates
+for update to authenticated
+using (public.is_admin() and public.has_app_permission('documents.templates.manage'))
+with check (public.is_admin() and public.has_app_permission('documents.templates.manage'));
+
+drop policy if exists patient_documents_select on public.patient_documents;
+create policy patient_documents_select on public.patient_documents
+for select to authenticated
+using (public.can_access_patient_document(patient_id, specialty, category));
+
+drop policy if exists patient_documents_insert on public.patient_documents;
+create policy patient_documents_insert on public.patient_documents
+for insert to authenticated
+with check (
+  public.has_app_permission('documents.manage')
+  and public.can_access_patient_document(patient_id, specialty, category)
+);
+
+drop policy if exists patient_documents_update on public.patient_documents;
+create policy patient_documents_update on public.patient_documents
+for update to authenticated
+using (
+  public.has_app_permission('documents.manage')
+  and public.can_access_patient_document(patient_id, specialty, category)
+)
+with check (
+  public.has_app_permission('documents.manage')
+  and public.can_access_patient_document(patient_id, specialty, category)
+);
+
+drop policy if exists document_requests_select on public.document_signature_requests;
+create policy document_requests_select on public.document_signature_requests
+for select to authenticated
+using (public.can_access_document_id(document_id));
+
+drop policy if exists document_requests_insert on public.document_signature_requests;
+create policy document_requests_insert on public.document_signature_requests
+for insert to authenticated
+with check (public.can_access_document_id(document_id) and public.has_app_permission('documents.manage'));
+
+drop policy if exists document_requests_update on public.document_signature_requests;
+create policy document_requests_update on public.document_signature_requests
+for update to authenticated
+using (public.can_access_document_id(document_id) and public.has_app_permission('documents.manage'))
+with check (public.can_access_document_id(document_id) and public.has_app_permission('documents.manage'));
+
+drop policy if exists document_events_select on public.document_events;
+create policy document_events_select on public.document_events
+for select to authenticated
+using (public.can_access_document_id(document_id));
+
+drop policy if exists document_events_insert on public.document_events;
+create policy document_events_insert on public.document_events
+for insert to authenticated
+with check (public.can_access_document_id(document_id) and public.has_app_permission('documents.view'));
+
+-- No hay pol�ticas de DELETE: los documentos, eventos y solicitudes no se
+-- eliminan desde el cliente. La retenci�n se gestiona con un procedimiento
+-- autorizado y documentado.
+
+grant select on public.document_templates to authenticated;
+grant insert, update on public.document_templates to authenticated;
+grant select, insert, update on public.patient_documents to authenticated;
+grant select, insert, update on public.document_signature_requests to authenticated;
+grant select, insert on public.document_events to authenticated;
+grant execute on function public.has_app_permission(text) to authenticated;
+grant execute on function public.can_access_patient_document(uuid, text, text) to authenticated;
+grant execute on function public.can_access_document_id(uuid) to authenticated;
+
+-- ------------------------------------------------------------
+-- 15.8 Bucket privado para PDF firmados
+-- ------------------------------------------------------------
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('patient-documents', 'patient-documents', false, 5242880, array['application/pdf'])
+on conflict (id) do update set public = false;
+
+drop policy if exists patient_documents_storage_select on storage.objects;
+create policy patient_documents_storage_select on storage.objects
+for select to authenticated
+using (
+  bucket_id = 'patient-documents'
+  and exists (
+    select 1
+    from public.patient_documents d
+    where d.id::text = (storage.foldername(name))[2]
+      and public.can_access_patient_document(d.patient_id, d.specialty, d.category)
+  )
+);
+
+-- La subida y descarga pasan por /api/document-signing con service_role.
+-- No se crean pol�ticas INSERT/UPDATE/DELETE para el cliente.

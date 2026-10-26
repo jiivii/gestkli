@@ -4,7 +4,7 @@ import {
   AlertTriangle, Baby, CalendarPlus, CheckCircle2, ChevronRight, FileWarning,
   Plus, Search, ShieldCheck, UserPlus, Users, X,
 } from 'lucide-react';
-import { Patient, PatientStatus, User, UserRole, ClinicalSpecialty } from '../types';
+import { Patient, PatientStatus, User, UserRole, ClinicalSpecialty, RepresentationType } from '../types';
 import { dbService } from '../services/dbService';
 import { hasPermission, isAdmin } from '../services/permissions';
 import {
@@ -24,6 +24,8 @@ const emptyForm = {
   privacyPolicySigned: false,
   alerts: '', allergies: '', administrativeNotes: '',
   guardianName: '', guardianDni: '', guardianPhone: '', guardianEmail: '', guardianRelationship: '',
+  secondaryGuardianName: '', secondaryGuardianDni: '', secondaryGuardianPhone: '', secondaryGuardianEmail: '', secondaryGuardianRelationship: '',
+  representationType: 'no_consta' as RepresentationType, guardianshipNotes: '',
 };
 
 type FormState = typeof emptyForm;
@@ -98,6 +100,13 @@ const Patients: React.FC<Props> = ({ user }) => {
       guardianPhone: patient.legalGuardian?.phone || '',
       guardianEmail: patient.legalGuardian?.email || '',
       guardianRelationship: patient.legalGuardian?.relationship || '',
+      secondaryGuardianName: patient.secondaryLegalGuardian?.name || '',
+      secondaryGuardianDni: patient.secondaryLegalGuardian?.dni || '',
+      secondaryGuardianPhone: patient.secondaryLegalGuardian?.phone || '',
+      secondaryGuardianEmail: patient.secondaryLegalGuardian?.email || '',
+      secondaryGuardianRelationship: patient.secondaryLegalGuardian?.relationship || '',
+      representationType: patient.representationType || 'no_consta',
+      guardianshipNotes: patient.guardianshipNotes || '',
     });
     setError('');
     setNotice('');
@@ -141,6 +150,18 @@ const Patients: React.FC<Props> = ({ user }) => {
       setError('Para un menor de edad, el nombre y DNI del representante legal son obligatorios.');
       return;
     }
+    if (formMinor && form.representationType === 'no_consta') {
+      setError('Indica el tipo de representación legal del menor (patria potestad, tutela, acogimiento u otro).');
+      return;
+    }
+    if (form.secondaryGuardianName.trim() && !form.secondaryGuardianDni.trim()) {
+      setError('Si registras un segundo representante, indica también su DNI.');
+      return;
+    }
+    if (form.secondaryGuardianName.trim() && !form.representationType) {
+      setError('Indica el tipo de representación antes de añadir un segundo representante.');
+      return;
+    }
     setSaving(true);
     try {
       const payload: Partial<Patient> = {
@@ -167,6 +188,17 @@ const Patients: React.FC<Props> = ({ user }) => {
               relationship: form.guardianRelationship.trim(),
             }
           : null,
+        secondaryLegalGuardian: form.secondaryGuardianName.trim()
+          ? {
+              name: form.secondaryGuardianName.trim(),
+              dni: form.secondaryGuardianDni.trim().toUpperCase(),
+              phone: form.secondaryGuardianPhone.trim(),
+              email: form.secondaryGuardianEmail.trim(),
+              relationship: form.secondaryGuardianRelationship.trim(),
+            }
+          : null,
+        representationType: (formMinor || form.guardianName.trim()) ? form.representationType : null,
+        guardianshipNotes: form.guardianshipNotes.trim() || undefined,
       };
 
       if (editPatient) {
@@ -365,18 +397,76 @@ const Patients: React.FC<Props> = ({ user }) => {
             <span>He informado y firmado la política de privacidad y el consentimiento informado correspondiente.</span>
           </label>
 
-          {formMinor && (
-            <div className="rounded-xl border border-logo-200 bg-logo-50/60 p-3">
-              <p className="mb-2 flex items-center gap-1.5 text-xs font-bold text-logo-900"><Baby size={14} /> Representante legal obligatorio</p>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Field label="Nombre y apellidos" required><input className={inputClass} value={form.guardianName} onChange={e => set({ guardianName: e.target.value })} /></Field>
-                <Field label="DNI" required><input className={inputClass} value={form.guardianDni} onChange={e => set({ guardianDni: e.target.value.toUpperCase() })} /></Field>
-                <Field label="Teléfono"><input className={inputClass} value={form.guardianPhone} onChange={e => set({ guardianPhone: e.target.value })} /></Field>
-                <Field label="Relación"><input className={inputClass} value={form.guardianRelationship} onChange={e => set({ guardianRelationship: e.target.value })} placeholder="Madre, padre, tutor legal…" /></Field>
-                <Field label="Email" className="sm:col-span-2"><input className={inputClass} value={form.guardianEmail} onChange={e => set({ guardianEmail: e.target.value })} /></Field>
+          <div className={`rounded-xl border p-3 ${formMinor ? 'border-logo-200 bg-logo-50/60' : 'border-stone-200 bg-stone-50/50'}`}>
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <p className={`flex items-center gap-1.5 text-xs font-bold ${formMinor ? 'text-logo-900' : 'text-stone-700'}`}>
+                <Baby size={14} /> Representación legal
+                {formMinor && <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-semibold text-logo-800">Obligatoria en menores</span>}
+              </p>
+              {formMinor && <span className="text-[10px] text-logo-800">No se presupone que una sola firma parental sea suficiente en todos los casos.</span>}
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field label="Tipo de representación" required={formMinor}>
+                <select className={inputClass} value={form.representationType} onChange={e => set({ representationType: e.target.value as RepresentationType })}>
+                  <option value="no_consta">No consta / sin representación</option>
+                  <option value="patria_potestad_conjunta">Patria potestad conjunta</option>
+                  <option value="patria_potestad_exclusiva">Patria potestad exclusiva</option>
+                  <option value="tutela">Tutela</option>
+                  <option value="acogimiento">Acogimiento</option>
+                  <option value="otro">Otro</option>
+                </select>
+              </Field>
+              <Field label="Relación del primer representante">
+                <input className={inputClass} value={form.guardianRelationship} onChange={e => set({ guardianRelationship: e.target.value })} placeholder="Madre, padre, tutor legal…" />
+              </Field>
+              <Field label="Nombre y apellidos del representante" required={formMinor}>
+                <input className={inputClass} value={form.guardianName} onChange={e => set({ guardianName: e.target.value })} />
+              </Field>
+              <Field label="DNI / NIE del representante" required={formMinor}>
+                <input className={inputClass} value={form.guardianDni} onChange={e => set({ guardianDni: e.target.value.toUpperCase() })} />
+              </Field>
+              <Field label="Teléfono del representante">
+                <input className={inputClass} value={form.guardianPhone} onChange={e => set({ guardianPhone: e.target.value })} />
+              </Field>
+              <Field label="Email del representante">
+                <input type="email" className={inputClass} value={form.guardianEmail} onChange={e => set({ guardianEmail: e.target.value })} />
+              </Field>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-stone-200 bg-white/70 p-3">
+              <p className="text-[11px] font-bold uppercase tracking-wide text-stone-500">Segundo representante legal</p>
+              <p className="mt-0.5 text-[10px] leading-relaxed text-stone-500">
+                Opcional. Regístralo si consta otra persona con representación. La necesidad de su firma depende del documento, la edad, la madurez, la capacidad y la ley aplicable; no se deduce automáticamente.
+              </p>
+              <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Field label="Nombre y apellidos">
+                  <input className={inputClass} value={form.secondaryGuardianName} onChange={e => set({ secondaryGuardianName: e.target.value })} />
+                </Field>
+                <Field label="DNI / NIE">
+                  <input className={inputClass} value={form.secondaryGuardianDni} onChange={e => set({ secondaryGuardianDni: e.target.value.toUpperCase() })} />
+                </Field>
+                <Field label="Relación">
+                  <input className={inputClass} value={form.secondaryGuardianRelationship} onChange={e => set({ secondaryGuardianRelationship: e.target.value })} placeholder="Madre, padre, tutor legal…" />
+                </Field>
+                <Field label="Teléfono">
+                  <input className={inputClass} value={form.secondaryGuardianPhone} onChange={e => set({ secondaryGuardianPhone: e.target.value })} />
+                </Field>
+                <Field label="Email" className="sm:col-span-2">
+                  <input type="email" className={inputClass} value={form.secondaryGuardianEmail} onChange={e => set({ secondaryGuardianEmail: e.target.value })} />
+                </Field>
               </div>
             </div>
-          )}
+
+            <Field label="Observaciones sobre representación o tutela" className="mt-3" hint="No incluyas información clínica. Documenta autorizaciones, limitaciones o resoluciones relevantes.">
+              <textarea className={inputClass + ' min-h-[64px]'} value={form.guardianshipNotes} onChange={e => set({ guardianshipNotes: e.target.value })} />
+            </Field>
+            {formMinor && form.representationType === 'patria_potestad_conjunta' && !form.secondaryGuardianName.trim() && (
+              <p className="mt-2 flex items-start gap-1.5 text-[10px] leading-relaxed text-amber-800">
+                <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                Consta patria potestad conjunta sin segundo representante registrado. No se bloqueará por ello, pero revisa cada documento y no asumas que una sola firma basta.
+              </p>
+            )}
+          </div>
 
           <Field label="Notas administrativas" hint="No incluyas información clínica en este campo.">
             <textarea className={`${inputClass} resize-y`} rows={3} value={form.administrativeNotes} onChange={e => set({ administrativeNotes: e.target.value })} />

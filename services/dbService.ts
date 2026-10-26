@@ -2,8 +2,9 @@ import { supabase, isConfigured } from '../supabaseClients';
 import {
   AcceptReservationPayload, Appointment, AppointmentStatus, AuditEntry, CashClosing,
   CenterSettings, ChatMessage, ChatRoom, ClinicalRecord, ClinicalSpecialty, ConsentRecord,
-  Expense, Invoice, InvoiceStatus, MedicalHistoryEntry, Notification, Patient, Payment,
-  PaymentInput, Permission, ReservationRequest, Service, SessionPackage, User, UserRole,
+  DocumentEvent, DocumentSignatureRequest, DocumentTemplate, Expense, Invoice, InvoiceStatus,
+  MedicalHistoryEntry, Notification, Patient, PatientDocument, Payment, PaymentInput, Permission,
+  ReservationRequest, Service, SessionPackage, User, UserRole,
 } from '../types';
 import {
   CLINICAL_SPECIALTIES, localTodayISO, resolveAppRole,
@@ -13,6 +14,7 @@ import {
   demoLogin, getDemoSession, getDemoState, newId, saveDemoState, setDemoSession,
   updateDemoState, resetDemoState,
 } from './demoStore';
+import { INITIAL_DOCUMENT_TEMPLATES } from './documentTemplates';
 
 // ============================================================
 //  Configuración del backend
@@ -103,6 +105,15 @@ const mapPatient = (p: any): Patient => ({
   } : (p.legalGuardian || null),
   administrativeNotes: p.administrative_notes || '',
   assignedSpecialties: p.assigned_specialties || p.assignedSpecialties || [],
+  secondaryLegalGuardian: p.secondary_legal_guardian_name ? {
+    name: p.secondary_legal_guardian_name,
+    dni: p.secondary_legal_guardian_dni || '',
+    phone: p.secondary_legal_guardian_phone || '',
+    email: p.secondary_legal_guardian_email || '',
+    relationship: p.secondary_legal_guardian_relationship || '',
+  } : (p.secondaryLegalGuardian || null),
+  representationType: p.representation_type || p.representationType || null,
+  guardianshipNotes: p.guardianship_notes || p.guardianshipNotes || '',
   demo: !!p.demo,
 });
 
@@ -241,6 +252,142 @@ const mapConsent = (c: any): ConsentRecord => ({
   demo: !!c.demo,
 });
 
+const jsonValue = (value: any, fallback: any = {}) => {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === 'string') {
+    try { return JSON.parse(value); } catch { return fallback; }
+  }
+  return value;
+};
+
+const mapDocumentTemplate = (t: any): DocumentTemplate => ({
+  id: t.id,
+  name: t.name,
+  category: t.category,
+  specialty: t.specialty || null,
+  description: t.description || '',
+  body: t.body || '',
+  fields: Array.isArray(t.fields) ? t.fields : jsonValue(t.fields, []),
+  version: Number(t.version) || 1,
+  active: t.active !== false,
+  legalStatus: t.legal_status ?? t.legalStatus ?? 'pendiente_revision',
+  legalReviewedBy: t.legal_reviewed_by ?? t.legalReviewedBy ?? null,
+  legalReviewedAt: t.legal_reviewed_at ?? t.legalReviewedAt ?? null,
+  legalReviewNotes: t.legal_review_notes ?? t.legalReviewNotes ?? '',
+  requiresSignature: t.requires_signature !== false,
+  signerRule: t.signer_rule ?? t.signerRule ?? 'manual',
+  validityDays: t.validity_days ?? t.validityDays ?? null,
+  required: !!t.required,
+  createdAt: t.created_at ?? t.createdAt,
+  updatedAt: t.updated_at ?? t.updatedAt,
+  createdBy: t.created_by ?? t.createdBy ?? null,
+  demo: !!t.demo,
+});
+
+const mapPatientDocument = (d: any): PatientDocument => {
+  const signers = Array.isArray(d.signers) ? d.signers : jsonValue(d.signers, []);
+  return {
+    id: d.id,
+    patientId: d.patient_id ?? d.patientId,
+    templateId: d.template_id ?? d.templateId ?? null,
+    templateName: d.template_name ?? d.templateName ?? '',
+    templateVersion: Number(d.template_version ?? d.templateVersion) || 1,
+    category: d.category,
+    specialty: d.specialty || null,
+    professionalId: d.professional_id ?? d.professionalId ?? null,
+    professionalName: d.professional_name ?? d.professionalName ?? null,
+    serviceId: d.service_id ?? d.serviceId ?? null,
+    serviceName: d.service_name ?? d.serviceName ?? null,
+    appointmentId: d.appointment_id ?? d.appointmentId ?? null,
+    title: d.title || 'Documento',
+    status: d.status || 'borrador',
+    version: Number(d.version) || 1,
+    isCurrent: d.is_current !== false,
+    replacesDocumentId: d.replaces_document_id ?? d.replacesDocumentId ?? null,
+    replacedByDocumentId: d.replaced_by_document_id ?? d.replacedByDocumentId ?? null,
+    fields: jsonValue(d.fields, {}),
+    patientSnapshot: jsonValue(d.patient_snapshot ?? d.patientSnapshot, {}),
+    professionalSnapshot: jsonValue(d.professional_snapshot ?? d.professionalSnapshot, {}),
+    centerSnapshot: jsonValue(d.center_snapshot ?? d.centerSnapshot, {}),
+    renderedText: d.rendered_text ?? d.renderedText ?? '',
+    contentSha256: d.content_sha256 ?? d.contentSha256 ?? '',
+    signers: signers.map((s: any) => ({ ...s })),
+    requiredSignatures: Number(d.required_signatures ?? d.requiredSignatures) || 0,
+    signedCount: Number(d.signed_count ?? d.signedCount) || signers.filter((s: any) => s.status === 'firmado').length,
+    signatureAssurance: d.signature_assurance ?? d.signatureAssurance ?? null,
+    signatureProvider: d.signature_provider ?? d.signatureProvider ?? null,
+    evidence: jsonValue(d.evidence, null),
+    signedPdfPath: d.signed_pdf_path ?? d.signedPdfPath ?? null,
+    signedPdfSha256: d.signed_pdf_sha256 ?? d.signedPdfSha256 ?? null,
+    signedPdfBase64: d.signed_pdf_base64 ?? d.signedPdfBase64 ?? null,
+    generatedPdfPath: d.generated_pdf_path ?? d.generatedPdfPath ?? null,
+    externalUpload: !!(d.external_upload ?? d.externalUpload),
+    sentAt: d.sent_at ?? d.sentAt ?? null,
+    viewedAt: d.viewed_at ?? d.viewedAt ?? null,
+    signedAt: d.signed_at ?? d.signedAt ?? null,
+    archivedAt: d.archived_at ?? d.archivedAt ?? null,
+    expiresAt: d.expires_at ?? d.expiresAt ?? null,
+    revokedAt: d.revoked_at ?? d.revokedAt ?? null,
+    revocationReason: d.revocation_reason ?? d.revocationReason ?? null,
+    notes: d.notes || '',
+    createdBy: d.created_by ?? d.createdBy ?? null,
+    createdByName: d.created_by_name ?? d.createdByName ?? null,
+    createdAt: d.created_at ?? d.createdAt,
+    updatedAt: d.updated_at ?? d.updatedAt,
+    demo: !!d.demo,
+  };
+};
+
+const mapDocumentEvent = (e: any): DocumentEvent => ({
+  id: e.id,
+  documentId: e.document_id ?? e.documentId,
+  patientId: e.patient_id ?? e.patientId,
+  requestId: e.request_id ?? e.requestId ?? null,
+  type: e.type,
+  actorId: e.actor_id ?? e.actorId ?? null,
+  actorName: e.actor_name ?? e.actorName ?? 'Sistema',
+  actorType: e.actor_type ?? e.actorType ?? 'sistema',
+  detail: e.detail || '',
+  metadata: jsonValue(e.metadata, null),
+  ipHint: e.ip_hint ?? e.ipHint ?? null,
+  userAgent: e.user_agent ?? e.userAgent ?? null,
+  createdAt: e.created_at ?? e.createdAt,
+  demo: !!e.demo,
+});
+
+const mapSignatureRequest = (r: any): DocumentSignatureRequest => ({
+  id: r.id,
+  documentId: r.document_id ?? r.documentId,
+  patientId: r.patient_id ?? r.patientId,
+  signerId: r.signer_id ?? r.signerId,
+  recipientName: r.recipient_name ?? r.recipientName ?? '',
+  recipientEmail: r.recipient_email ?? r.recipientEmail ?? '',
+  condition: r.condition,
+  tokenHash: r.token_hash ?? r.tokenHash ?? '',
+  otpHash: r.otp_hash ?? r.otpHash ?? null,
+  otpExpiresAt: r.otp_expires_at ?? r.otpExpiresAt ?? null,
+  otpAttempts: Number(r.otp_attempts ?? r.otpAttempts) || 0,
+  otpLastSentAt: r.otp_last_sent_at ?? r.otpLastSentAt ?? null,
+  verificationHash: r.verification_hash ?? r.verificationHash ?? null,
+  verificationExpiresAt: r.verification_expires_at ?? r.verificationExpiresAt ?? null,
+  verifiedAt: r.verified_at ?? r.verifiedAt ?? null,
+  status: r.status || 'pendiente',
+  expiresAt: r.expires_at ?? r.expiresAt,
+  sentAt: r.sent_at ?? r.sentAt,
+  sentCount: Number(r.sent_count ?? r.sentCount) || 1,
+  openedAt: r.opened_at ?? r.openedAt ?? null,
+  signedAt: r.signed_at ?? r.signedAt ?? null,
+  rejectedAt: r.rejected_at ?? r.rejectedAt ?? null,
+  failureReason: r.failure_reason ?? r.failureReason ?? null,
+  signedPdfPath: r.signed_pdf_path ?? r.signedPdfPath ?? null,
+  signedPdfSha256: r.signed_pdf_sha256 ?? r.signedPdfSha256 ?? null,
+  evidence: jsonValue(r.evidence, null),
+  createdBy: r.created_by ?? r.createdBy ?? null,
+  createdAt: r.created_at ?? r.createdAt,
+  demo: !!r.demo,
+});
+
+
 const mapAudit = (a: any): AuditEntry => ({
   id: a.id,
   userId: a.user_id ?? a.userId,
@@ -257,7 +404,7 @@ const mapAudit = (a: any): AuditEntry => ({
 
 const defaultSettings: CenterSettings = {
   centerName: 'Sinestesya',
-  legalName: 'Sinestesya Salud Integral S.L.',
+  legalName: 'Sinestesya Villarroya S.L.',
   cif: '',
   address: '',
   phone: '',
@@ -270,6 +417,22 @@ const defaultSettings: CenterSettings = {
   aiEnabled: false,
   aiPrivacyReviewed: false,
   lastBackupAt: null,
+  documentSettings: {
+    dpoName: '',
+    dpoEmail: '',
+    privacyEmail: 'privacidad@sinestesya.es',
+    emailFrom: '',
+    signatureProvider: 'external',
+    signatureProviderLabel: 'Proveedor externo pendiente de configurar',
+    signatureLevel: 'avanzada_proveedor',
+    linkTtlHours: 72,
+    otpTtlMinutes: 10,
+    otpMaxAttempts: 5,
+    requireLegalReview: true,
+    lastLegalReviewAt: null,
+    privacyNoticeVersion: '1.0',
+    notes: 'Configura un proveedor de firma y el correo transaccional antes de habilitar el módulo en producción.',
+  },
 };
 
 // ============================================================
@@ -414,6 +577,9 @@ export const dbService = {
         alerts: patient.alerts || [],
         allergies: patient.allergies || [],
         legalGuardian: patient.legalGuardian || null,
+        secondaryLegalGuardian: patient.secondaryLegalGuardian || null,
+        representationType: patient.representationType || null,
+        guardianshipNotes: patient.guardianshipNotes || '',
         administrativeNotes: patient.administrativeNotes || '',
         assignedSpecialties: creator && CLINICAL_SPECIALTIES.includes(creator.role as ClinicalSpecialty)
           ? [creator.role as ClinicalSpecialty]
@@ -459,6 +625,13 @@ export const dbService = {
       legal_guardian_phone: patient.legalGuardian?.phone || null,
       legal_guardian_email: patient.legalGuardian?.email || null,
       legal_guardian_relationship: patient.legalGuardian?.relationship || null,
+      secondary_legal_guardian_name: patient.secondaryLegalGuardian?.name || null,
+      secondary_legal_guardian_dni: patient.secondaryLegalGuardian?.dni || null,
+      secondary_legal_guardian_phone: patient.secondaryLegalGuardian?.phone || null,
+      secondary_legal_guardian_email: patient.secondaryLegalGuardian?.email || null,
+      secondary_legal_guardian_relationship: patient.secondaryLegalGuardian?.relationship || null,
+      representation_type: patient.representationType || null,
+      guardianship_notes: patient.guardianshipNotes || null,
       administrative_notes: patient.administrativeNotes || null,
       status: 'activo',
     };
@@ -510,6 +683,15 @@ export const dbService = {
       payload.legal_guardian_email = patch.legalGuardian?.email || null;
       payload.legal_guardian_relationship = patch.legalGuardian?.relationship || null;
     }
+    if (patch.secondaryLegalGuardian !== undefined) {
+      payload.secondary_legal_guardian_name = patch.secondaryLegalGuardian?.name || null;
+      payload.secondary_legal_guardian_dni = patch.secondaryLegalGuardian?.dni || null;
+      payload.secondary_legal_guardian_phone = patch.secondaryLegalGuardian?.phone || null;
+      payload.secondary_legal_guardian_email = patch.secondaryLegalGuardian?.email || null;
+      payload.secondary_legal_guardian_relationship = patch.secondaryLegalGuardian?.relationship || null;
+    }
+    if (patch.representationType !== undefined) payload.representation_type = patch.representationType || null;
+    if (patch.guardianshipNotes !== undefined) payload.guardianship_notes = patch.guardianshipNotes || null;
     payload.updated_at = new Date().toISOString();
     const { error } = await supabase.from('patients').update(payload).eq('id', id);
     if (!error) await this.logAudit(actor, 'patient.update', 'patient', id, 'Actualización de datos administrativos', id);
@@ -1362,6 +1544,455 @@ export const dbService = {
   },
 
   // ----------------------------------------------------------
+  // DOCUMENTACIÓN LEGAL Y FIRMA ELECTRÓNICA
+  // ----------------------------------------------------------
+  async getDocumentTemplates(includeAll = true): Promise<DocumentTemplate[]> {
+    if (isDemoMode) {
+      const list = [...getDemoState().documentTemplates]
+        .sort((a, b) => a.name.localeCompare(b.name, 'es'));
+      return includeAll ? list : list.filter(t => t.active && t.legalStatus === 'aprobada');
+    }
+    let query = supabase.from('document_templates').select('*').order('name');
+    if (!includeAll) query = query.eq('active', true).eq('legal_status', 'aprobada');
+    const { data, error } = await query;
+    return error ? [] : (data || []).map(mapDocumentTemplate);
+  },
+
+  async getDocumentTemplate(id: string): Promise<DocumentTemplate | undefined> {
+    if (isDemoMode) return getDemoState().documentTemplates.find(t => t.id === id);
+    const { data } = await supabase.from('document_templates').select('*').eq('id', id).maybeSingle();
+    return data ? mapDocumentTemplate(data) : undefined;
+  },
+
+  /** Restaura la biblioteca inicial solo si no existe ninguna plantilla. */
+  async ensureDocumentTemplates(actor?: User): Promise<DocumentTemplate[]> {
+    const existing = await this.getDocumentTemplates(true);
+    if (existing.length) return existing;
+    const created: DocumentTemplate[] = [];
+    for (const template of INITIAL_DOCUMENT_TEMPLATES) {
+      const { id, createdAt, updatedAt, demo, ...draft } = template;
+      created.push(await this.saveDocumentTemplate(draft, actor));
+    }
+    return created;
+  },
+
+  async saveDocumentTemplate(template: Partial<DocumentTemplate>, actor?: User): Promise<DocumentTemplate> {
+    const now = new Date().toISOString();
+    if (isDemoMode) {
+      const state = getDemoState();
+      if (template.id) {
+        const existing = state.documentTemplates.find(t => t.id === template.id);
+        if (existing) {
+          Object.assign(existing, template, { updatedAt: now });
+          saveDemoState(state);
+          await this.logAudit(actor, 'document_template.update', 'document_template', existing.id, `Actualización de plantilla ${existing.name}`, null);
+          return existing;
+        }
+      }
+      const created: DocumentTemplate = {
+        id: newId('dtpl'), name: template.name || 'Plantilla sin título',
+        category: template.category || 'general', specialty: template.specialty || null,
+        description: template.description || '', body: template.body || '', fields: template.fields || [],
+        version: Number(template.version) || 1, active: template.active !== false,
+        legalStatus: template.legalStatus || 'pendiente_revision',
+        legalReviewedBy: template.legalReviewedBy || null, legalReviewedAt: template.legalReviewedAt || null,
+        legalReviewNotes: template.legalReviewNotes || '', requiresSignature: template.requiresSignature !== false,
+        signerRule: template.signerRule || 'manual', validityDays: template.validityDays ?? null,
+        required: !!template.required, createdAt: now, updatedAt: now,
+        createdBy: actor?.id || null, demo: true,
+      };
+      state.documentTemplates.unshift(created);
+      saveDemoState(state);
+      await this.logAudit(actor, 'document_template.create', 'document_template', created.id, `Alta de plantilla ${created.name}`, null);
+      return created;
+    }
+    const payload: any = {
+      name: template.name, category: template.category, specialty: template.specialty || null,
+      description: template.description || '', body: template.body || '', fields: template.fields || [],
+      version: Number(template.version) || 1, active: template.active !== false,
+      legal_status: template.legalStatus || 'pendiente_revision',
+      legal_reviewed_by: template.legalReviewedBy || null, legal_reviewed_at: template.legalReviewedAt || null,
+      legal_review_notes: template.legalReviewNotes || '', requires_signature: template.requiresSignature !== false,
+      signer_rule: template.signerRule || 'manual', validity_days: template.validityDays ?? null,
+      required: !!template.required, updated_at: now,
+    };
+    if (template.id) {
+      const { data, error } = await supabase.from('document_templates').update(payload).eq('id', template.id).select('*').single();
+      if (error) throw new Error(error.message);
+      await this.logAudit(actor, 'document_template.update', 'document_template', data.id, `Actualización de plantilla ${data.name}`, null);
+      return mapDocumentTemplate(data);
+    }
+    payload.created_by = actor?.id || null;
+    const { data, error } = await supabase.from('document_templates').insert(payload).select('*').single();
+    if (error) throw new Error(error.message);
+    await this.logAudit(actor, 'document_template.create', 'document_template', data.id, `Alta de plantilla ${data.name}`, null);
+    return mapDocumentTemplate(data);
+  },
+
+  /** Crea una nueva versión de una plantilla aprobada y retira la anterior. */
+  async createDocumentTemplateVersion(
+    base: DocumentTemplate,
+    changes: Partial<DocumentTemplate>,
+    actor?: User,
+  ): Promise<DocumentTemplate> {
+    const now = new Date().toISOString();
+    const { id, createdAt, updatedAt, demo, ...baseRest } = base;
+    const draft: Partial<DocumentTemplate> = {
+      ...baseRest,
+      ...changes,
+      version: base.version + 1,
+      active: true,
+      legalStatus: 'pendiente_revision',
+      legalReviewedBy: null,
+      legalReviewedAt: null,
+      legalReviewNotes: '',
+      createdBy: actor?.id || null,
+    };
+
+    if (isDemoMode) {
+      const state = getDemoState();
+      const existing = state.documentTemplates.find(t => t.id === base.id);
+      if (!existing) throw new Error('Plantilla no encontrada.');
+      const created: DocumentTemplate = {
+        ...(draft as DocumentTemplate),
+        id: newId('dtpl'), createdAt: now, updatedAt: now, demo: true,
+      };
+      existing.active = false;
+      existing.updatedAt = now;
+      state.documentTemplates.unshift(created);
+      saveDemoState(state);
+      await this.logAudit(actor, 'document_template.version', 'document_template', created.id, `Nueva versión ${created.version} de ${created.name}; versión anterior retirada`, null);
+      return created;
+    }
+
+    const payload: any = {
+      name: draft.name, category: draft.category, specialty: draft.specialty || null,
+      description: draft.description || '', body: draft.body || '', fields: draft.fields || [],
+      version: draft.version, active: true, legal_status: 'pendiente_revision',
+      legal_reviewed_by: null, legal_reviewed_at: null, legal_review_notes: '',
+      requires_signature: draft.requiresSignature !== false,
+      signer_rule: draft.signerRule || 'manual', validity_days: draft.validityDays ?? null,
+      required: !!draft.required, created_by: actor?.id || null, updated_at: now,
+    };
+    const { data: created, error: insertError } = await supabase
+      .from('document_templates').insert(payload).select('*').single();
+    if (insertError) throw new Error(insertError.message);
+    const { error: retireError } = await supabase
+      .from('document_templates').update({ active: false, updated_at: now }).eq('id', base.id);
+    if (retireError) {
+      // Si no se pudo retirar la anterior, la nueva queda inactiva para no
+      // dejar dos versiones utilizables y se informa del fallo.
+      await supabase.from('document_templates').update({ active: false }).eq('id', created.id);
+      throw new Error(`No se pudo retirar la versión anterior: ${retireError.message}`);
+    }
+    await this.logAudit(actor, 'document_template.version', 'document_template', created.id, `Nueva versión ${created.version} de ${created.name}; versión anterior retirada`, null);
+    return mapDocumentTemplate(created);
+  },
+
+  async setDocumentTemplateActive(template: DocumentTemplate, active: boolean, actor?: User): Promise<DocumentTemplate> {
+    const now = new Date().toISOString();
+    if (isDemoMode) {
+      const state = getDemoState();
+      const existing = state.documentTemplates.find(t => t.id === template.id);
+      if (!existing) throw new Error('Plantilla no encontrada.');
+      if (active) {
+        state.documentTemplates.forEach(t => {
+          if (t.id !== existing.id && t.name === existing.name && t.legalStatus === 'aprobada') t.active = false;
+        });
+      }
+      existing.active = active;
+      existing.updatedAt = now;
+      saveDemoState(state);
+      await this.logAudit(actor, active ? 'document_template.activate' : 'document_template.deactivate', 'document_template', existing.id, `${active ? 'Activación' : 'Desactivación'} de ${existing.name}`, null);
+      return existing;
+    }
+    if (active) {
+      await supabase.from('document_templates')
+        .update({ active: false, updated_at: now })
+        .eq('name', template.name).eq('legal_status', 'aprobada').neq('id', template.id);
+    }
+    const { data, error } = await supabase.from('document_templates')
+      .update({ active, updated_at: now }).eq('id', template.id).select('*').single();
+    if (error) throw new Error(error.message);
+    await this.logAudit(actor, active ? 'document_template.activate' : 'document_template.deactivate', 'document_template', data.id, `${active ? 'Activación' : 'Desactivación'} de ${data.name}`, null);
+    return mapDocumentTemplate(data);
+  },
+
+  async approveDocumentTemplate(
+    templateId: string,
+    reviewedBy: string,
+    reviewedAt: string,
+    notes: string,
+    actor?: User,
+  ): Promise<DocumentTemplate> {
+    const now = new Date().toISOString();
+    const reviewer = reviewedBy.trim();
+    if (!reviewer) throw new Error('Indica quién ha revisado la plantilla.');
+    if (isDemoMode) {
+      const state = getDemoState();
+      const existing = state.documentTemplates.find(t => t.id === templateId);
+      if (!existing) throw new Error('Plantilla no encontrada.');
+      existing.legalStatus = 'aprobada';
+      existing.legalReviewedBy = reviewer;
+      existing.legalReviewedAt = reviewedAt;
+      existing.legalReviewNotes = notes.trim();
+      existing.updatedAt = now;
+      state.documentTemplates.forEach(t => {
+        if (t.id !== existing.id && t.name === existing.name && t.legalStatus === 'aprobada') t.active = false;
+      });
+      saveDemoState(state);
+      await this.logAudit(actor, 'document_template.approve', 'document_template', existing.id, `Plantilla aprobada por ${reviewer}`, null);
+      return existing;
+    }
+    const { data, error } = await supabase.from('document_templates').update({
+      legal_status: 'aprobada', legal_reviewed_by: reviewer,
+      legal_reviewed_at: reviewedAt, legal_review_notes: notes.trim(),
+      active: true, updated_at: now,
+    }).eq('id', templateId).select('*').single();
+    if (error) throw new Error(error.message);
+    await supabase.from('document_templates')
+      .update({ active: false, updated_at: now })
+      .eq('name', data.name).eq('legal_status', 'aprobada').neq('id', data.id);
+    await this.logAudit(actor, 'document_template.approve', 'document_template', data.id, `Plantilla aprobada por ${reviewer}`, null);
+    return mapDocumentTemplate(data);
+  },
+
+  async getPatientDocuments(patientId: string): Promise<PatientDocument[]> {
+    if (isDemoMode) {
+      return getDemoState().patientDocuments
+        .filter(d => d.patientId === patientId)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    }
+    const { data, error } = await supabase
+      .from('patient_documents').select('*').eq('patient_id', patientId)
+      .order('created_at', { ascending: false });
+    return error ? [] : (data || []).map(mapPatientDocument);
+  },
+
+  async getPatientDocument(id: string): Promise<PatientDocument | undefined> {
+    if (isDemoMode) return getDemoState().patientDocuments.find(d => d.id === id);
+    const { data } = await supabase.from('patient_documents').select('*').eq('id', id).maybeSingle();
+    return data ? mapPatientDocument(data) : undefined;
+  },
+
+  async savePatientDocument(document: Partial<PatientDocument>, actor?: User): Promise<PatientDocument> {
+    const now = new Date().toISOString();
+    if (isDemoMode) {
+      const state = getDemoState();
+      if (document.id) {
+        const existing = state.patientDocuments.find(d => d.id === document.id);
+        if (!existing) throw new Error('Documento no encontrado.');
+        if (existing.status === 'firmado' || existing.archivedAt) {
+          const forbidden = ['renderedText', 'contentSha256', 'patientSnapshot', 'templateVersion', 'title']
+            .some(key => (document as any)[key] !== undefined && (document as any)[key] !== (existing as any)[key]);
+          if (forbidden) throw new Error('Un documento firmado no se puede modificar. Genera una nueva versión.');
+        }
+        Object.assign(existing, document, { updatedAt: now });
+        saveDemoState(state);
+        return existing;
+      }
+      const created: PatientDocument = {
+        id: newId('doc'), patientId: document.patientId!, templateId: document.templateId || null,
+        templateName: document.templateName || '', templateVersion: document.templateVersion || 1,
+        category: document.category || 'general', specialty: document.specialty || null,
+        professionalId: document.professionalId || actor?.id || null,
+        professionalName: document.professionalName || actor?.name || null,
+        serviceId: document.serviceId || null, serviceName: document.serviceName || null,
+        appointmentId: document.appointmentId || null, title: document.title || 'Documento',
+        status: document.status || 'borrador', version: document.version || 1,
+        isCurrent: document.isCurrent !== false,
+        replacesDocumentId: document.replacesDocumentId || null,
+        replacedByDocumentId: document.replacedByDocumentId || null,
+        fields: document.fields || {}, patientSnapshot: document.patientSnapshot || {},
+        professionalSnapshot: document.professionalSnapshot || {}, centerSnapshot: document.centerSnapshot || {},
+        renderedText: document.renderedText || '', contentSha256: document.contentSha256 || '',
+        signers: document.signers || [], requiredSignatures: document.requiredSignatures || 0,
+        signedCount: document.signedCount || 0, signatureAssurance: document.signatureAssurance || null,
+        signatureProvider: document.signatureProvider || null, evidence: document.evidence || null,
+        signedPdfPath: document.signedPdfPath || null, signedPdfSha256: document.signedPdfSha256 || null,
+        signedPdfBase64: document.signedPdfBase64 || null, generatedPdfPath: document.generatedPdfPath || null,
+        externalUpload: !!document.externalUpload, sentAt: document.sentAt || null,
+        viewedAt: document.viewedAt || null, signedAt: document.signedAt || null,
+        archivedAt: document.archivedAt || null, expiresAt: document.expiresAt || null,
+        revokedAt: document.revokedAt || null, revocationReason: document.revocationReason || null,
+        notes: document.notes || '', createdBy: actor?.id || null, createdByName: actor?.name || null,
+        createdAt: now, updatedAt: now, demo: true,
+      };
+      state.patientDocuments.unshift(created);
+      if (document.replacesDocumentId) {
+        const previous = state.patientDocuments.find(d => d.id === document.replacesDocumentId);
+        if (previous) {
+          previous.isCurrent = false;
+          previous.status = 'sustituido';
+          previous.replacedByDocumentId = created.id;
+          previous.updatedAt = now;
+        }
+      }
+      saveDemoState(state);
+      await this.logAudit(actor, 'document.create', 'patient_document', created.id, `Documento ${created.title} generado`, created.patientId);
+      return created;
+    }
+    const payload: any = {
+      patient_id: document.patientId, template_id: document.templateId || null,
+      template_name: document.templateName, template_version: document.templateVersion,
+      category: document.category, specialty: document.specialty || null,
+      professional_id: document.professionalId || actor?.id || null,
+      professional_name: document.professionalName || actor?.name || null,
+      service_id: document.serviceId || null, service_name: document.serviceName || null,
+      appointment_id: document.appointmentId || null, title: document.title,
+      status: document.status || 'borrador', version: document.version || 1,
+      is_current: document.isCurrent !== false,
+      replaces_document_id: document.replacesDocumentId || null,
+      replaced_by_document_id: document.replacedByDocumentId || null,
+      fields: document.fields || {}, patient_snapshot: document.patientSnapshot || {},
+      professional_snapshot: document.professionalSnapshot || {}, center_snapshot: document.centerSnapshot || {},
+      rendered_text: document.renderedText || '', content_sha256: document.contentSha256 || '',
+      signers: document.signers || [], required_signatures: document.requiredSignatures || 0,
+      signed_count: document.signedCount || 0, signature_assurance: document.signatureAssurance || null,
+      signature_provider: document.signatureProvider || null, evidence: document.evidence || null,
+      signed_pdf_path: document.signedPdfPath || null, signed_pdf_sha256: document.signedPdfSha256 || null,
+      generated_pdf_path: document.generatedPdfPath || null, external_upload: !!document.externalUpload,
+      sent_at: document.sentAt || null, viewed_at: document.viewedAt || null,
+      signed_at: document.signedAt || null, archived_at: document.archivedAt || null,
+      expires_at: document.expiresAt || null, revoked_at: document.revokedAt || null,
+      revocation_reason: document.revocationReason || null, notes: document.notes || '',
+      updated_at: now,
+    };
+    if (document.id) {
+      const { data, error } = await supabase.from('patient_documents').update(payload).eq('id', document.id).select('*').single();
+      if (error) throw new Error(error.message);
+      return mapPatientDocument(data);
+    }
+    payload.created_by = actor?.id || null;
+    payload.created_by_name = actor?.name || null;
+    const { data, error } = await supabase.from('patient_documents').insert(payload).select('*').single();
+    if (error) throw new Error(error.message);
+    if (document.replacesDocumentId) {
+      await supabase.from('patient_documents').update({
+        is_current: false,
+        status: 'sustituido',
+        replaced_by_document_id: data.id,
+        updated_at: now,
+      }).eq('id', document.replacesDocumentId);
+    }
+    await this.logAudit(actor, 'document.create', 'patient_document', data.id, `Documento ${data.title} generado`, data.patient_id);
+    return mapPatientDocument(data);
+  },
+
+  async getDocumentEvents(documentId: string): Promise<DocumentEvent[]> {
+    if (isDemoMode) {
+      return getDemoState().documentEvents
+        .filter(e => e.documentId === documentId)
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    }
+    const { data } = await supabase.from('document_events').select('*').eq('document_id', documentId).order('created_at');
+    return (data || []).map(mapDocumentEvent);
+  },
+
+  async addDocumentEvent(event: Partial<DocumentEvent>): Promise<DocumentEvent> {
+    const now = new Date().toISOString();
+    if (isDemoMode) {
+      const created: DocumentEvent = {
+        id: newId('dev'), documentId: event.documentId!, patientId: event.patientId!,
+        requestId: event.requestId || null, type: event.type || 'updated',
+        actorId: event.actorId || null, actorName: event.actorName || 'Sistema',
+        actorType: event.actorType || 'usuario', detail: event.detail || '',
+        metadata: event.metadata || null, ipHint: event.ipHint || null,
+        userAgent: event.userAgent || null, createdAt: now, demo: true,
+      };
+      updateDemoState(s => { s.documentEvents.push(created); });
+      return created;
+    }
+    const { data, error } = await supabase.from('document_events').insert({
+      document_id: event.documentId, patient_id: event.patientId, request_id: event.requestId || null,
+      type: event.type || 'updated', actor_id: event.actorId || null,
+      actor_name: event.actorName || 'Sistema', actor_type: event.actorType || 'usuario',
+      detail: event.detail || '', metadata: event.metadata || null,
+      ip_hint: event.ipHint || null, user_agent: event.userAgent || null,
+    }).select('*').single();
+    if (error) throw new Error(error.message);
+    return mapDocumentEvent(data);
+  },
+
+  async getDocumentSignatureRequests(documentId: string): Promise<DocumentSignatureRequest[]> {
+    if (isDemoMode) return getDemoState().documentSignatureRequests.filter(r => r.documentId === documentId);
+    const { data } = await supabase.from('document_signature_requests').select('*').eq('document_id', documentId).order('created_at', { ascending: false });
+    return (data || []).map(mapSignatureRequest);
+  },
+
+  async createDocumentSignatureRequest(request: Partial<DocumentSignatureRequest>): Promise<DocumentSignatureRequest> {
+    const now = new Date().toISOString();
+    if (isDemoMode) {
+      const created: DocumentSignatureRequest = {
+        id: newId('dsr'), documentId: request.documentId!, patientId: request.patientId!,
+        signerId: request.signerId!, recipientName: request.recipientName || '',
+        recipientEmail: (request.recipientEmail || '').toLowerCase(), condition: request.condition!,
+        tokenHash: request.tokenHash!, otpHash: request.otpHash || null,
+        otpExpiresAt: request.otpExpiresAt || null, otpAttempts: 0,
+        otpLastSentAt: request.otpLastSentAt || null, verificationHash: null,
+        verificationExpiresAt: null, verifiedAt: null, status: 'pendiente',
+        expiresAt: request.expiresAt!, sentAt: now, sentCount: 1,
+        openedAt: null, signedAt: null, rejectedAt: null, failureReason: null,
+        signedPdfPath: null, signedPdfSha256: null, evidence: null,
+        createdBy: request.createdBy || null, createdAt: now, demo: true,
+      };
+      updateDemoState(s => { s.documentSignatureRequests.unshift(created); });
+      return created;
+    }
+    const { data, error } = await supabase.from('document_signature_requests').insert({
+      document_id: request.documentId, patient_id: request.patientId, signer_id: request.signerId,
+      recipient_name: request.recipientName, recipient_email: (request.recipientEmail || '').toLowerCase(),
+      condition: request.condition, token_hash: request.tokenHash, otp_hash: request.otpHash || null,
+      otp_expires_at: request.otpExpiresAt || null, otp_attempts: 0,
+      otp_last_sent_at: request.otpLastSentAt || null, status: 'pendiente',
+      expires_at: request.expiresAt, sent_at: now, sent_count: 1,
+      created_by: request.createdBy || null,
+    }).select('*').single();
+    if (error) throw new Error(error.message);
+    return mapSignatureRequest(data);
+  },
+
+  async updateDocumentSignatureRequest(id: string, patch: Partial<DocumentSignatureRequest>): Promise<DocumentSignatureRequest | null> {
+    if (isDemoMode) {
+      const state = getDemoState();
+      const existing = state.documentSignatureRequests.find(r => r.id === id);
+      if (!existing) return null;
+      Object.assign(existing, patch);
+      saveDemoState(state);
+      return existing;
+    }
+    const map: Record<string, string> = {
+      otpHash: 'otp_hash', otpExpiresAt: 'otp_expires_at', otpAttempts: 'otp_attempts',
+      otpLastSentAt: 'otp_last_sent_at', verificationHash: 'verification_hash',
+      verificationExpiresAt: 'verification_expires_at', verifiedAt: 'verified_at',
+      status: 'status', expiresAt: 'expires_at', sentAt: 'sent_at', sentCount: 'sent_count',
+      openedAt: 'opened_at', signedAt: 'signed_at', rejectedAt: 'rejected_at',
+      failureReason: 'failure_reason', signedPdfPath: 'signed_pdf_path',
+      signedPdfSha256: 'signed_pdf_sha256', evidence: 'evidence', tokenHash: 'token_hash',
+      recipientEmail: 'recipient_email', recipientName: 'recipient_name',
+    };
+    const payload: any = {};
+    for (const [key, column] of Object.entries(map)) {
+      if ((patch as any)[key] !== undefined) payload[column] = (patch as any)[key];
+    }
+    const { data, error } = await supabase.from('document_signature_requests').update(payload).eq('id', id).select('*').single();
+    if (error) throw new Error(error.message);
+    return mapSignatureRequest(data);
+  },
+
+  async getSignatureRequestByTokenHash(tokenHash: string): Promise<DocumentSignatureRequest | undefined> {
+    if (isDemoMode) return getDemoState().documentSignatureRequests.find(r => r.tokenHash === tokenHash);
+    const { data } = await supabase.from('document_signature_requests').select('*').eq('token_hash', tokenHash).maybeSingle();
+    return data ? mapSignatureRequest(data) : undefined;
+  },
+
+  async getSignatureRequestById(id: string): Promise<DocumentSignatureRequest | undefined> {
+    if (isDemoMode) return getDemoState().documentSignatureRequests.find(r => r.id === id);
+    const { data } = await supabase.from('document_signature_requests').select('*').eq('id', id).maybeSingle();
+    return data ? mapSignatureRequest(data) : undefined;
+  },
+
+  // ----------------------------------------------------------
   // AUDITORÍA
   // ----------------------------------------------------------
   async logAudit(
@@ -1420,12 +2051,25 @@ export const dbService = {
       aiEnabled: !!data.ai_enabled,
       aiPrivacyReviewed: !!data.ai_privacy_reviewed,
       lastBackupAt: data.last_backup_at || null,
+      documentSettings: {
+        ...(defaultSettings.documentSettings!),
+        ...(typeof data.document_settings === 'string' ? safeParse(data.document_settings) : (data.document_settings || {})),
+      },
     };
   },
 
   async saveSettings(settings: CenterSettings, actor?: User): Promise<boolean> {
     if (isDemoMode) {
-      updateDemoState(s => { s.settings = settings; });
+      updateDemoState(s => {
+        s.settings = {
+          ...s.settings,
+          ...settings,
+          documentSettings: {
+            ...(s.settings.documentSettings || defaultSettings.documentSettings!),
+            ...(settings.documentSettings || {}),
+          },
+        };
+      });
       await this.logAudit(actor, 'settings.update', 'settings', '1', 'Actualización de configuración del centro', null);
       return true;
     }
@@ -1436,6 +2080,7 @@ export const dbService = {
       clinical_access_justification: settings.clinicalAccessJustification,
       retention_years: settings.retentionYears, ai_enabled: settings.aiEnabled,
       ai_privacy_reviewed: settings.aiPrivacyReviewed, last_backup_at: settings.lastBackupAt,
+      document_settings: settings.documentSettings || defaultSettings.documentSettings,
       updated_at: new Date().toISOString(),
     }, { onConflict: 'id' });
     if (!error) await this.logAudit(actor, 'settings.update', 'settings', '1', 'Actualización de configuración del centro', null);

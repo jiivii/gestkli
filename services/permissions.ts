@@ -1,4 +1,4 @@
-import { ClinicalSpecialty, Permission, User, UserRole } from '../types';
+import { ClinicalSpecialty, DocumentCategory, PatientDocument, Permission, User, UserRole } from '../types';
 import { CLINICAL_SPECIALTIES, isClinicalRole } from '../constants';
 
 const ADMIN_BASE: Permission[] = [
@@ -16,6 +16,9 @@ const ADMIN_BASE: Permission[] = [
   'settings.manage',
   'audit.view',
   'clinical.consents.manage',
+  'documents.view',
+  'documents.manage',
+  'documents.templates.manage',
   'messages.use',
 ];
 
@@ -27,6 +30,8 @@ const CLINICAL_BASE: Permission[] = [
   'clinical.view.own',
   'clinical.write.own',
   'clinical.consents.manage',
+  'documents.view',
+  'documents.manage',
   'messages.use',
 ];
 
@@ -55,6 +60,9 @@ export const ALL_PERMISSIONS: { id: Permission; label: string; group: string }[]
   { id: 'clinical.write.own', label: 'Registrar en su especialidad', group: 'Clínica' },
   { id: 'clinical.view.all', label: 'Ver historias clínicas de todas las especialidades (autorización expresa)', group: 'Clínica' },
   { id: 'clinical.consents.manage', label: 'Gestionar consentimientos', group: 'Clínica' },
+  { id: 'documents.view', label: 'Ver documentación y consentimientos', group: 'Documentación' },
+  { id: 'documents.manage', label: 'Generar, enviar y archivar documentación', group: 'Documentación' },
+  { id: 'documents.templates.manage', label: 'Gestionar plantillas documentales y su revisión', group: 'Documentación' },
   { id: 'billing.view', label: 'Ver facturación y cobros', group: 'Administración' },
   { id: 'billing.manage', label: 'Gestionar facturación y cobros', group: 'Administración' },
   { id: 'services.manage', label: 'Gestionar servicios, tarifas y salas', group: 'Administración' },
@@ -118,6 +126,24 @@ export const visibleClinicalSpecialties = (user: User | null | undefined): Clini
   return CLINICAL_SPECIALTIES.filter(s => canViewSpecialty(user, s));
 };
 
+const CLINICAL_DOCUMENT_CATEGORIES: DocumentCategory[] = ['psicologia', 'fisioterapia', 'nutricion', 'logopedia', 'menores'];
+
+/** Visibilidad de un documento concreto según rol, especialidad y permiso clínico. */
+export const canViewPatientDocument = (user: User | null | undefined, document: PatientDocument): boolean => {
+  if (!user || !hasPermission(user, 'documents.view')) return false;
+  const clinical = !!document.specialty || CLINICAL_DOCUMENT_CATEGORIES.includes(document.category);
+  if (isAdmin(user)) {
+    return !clinical || hasPermission(user, 'clinical.view.all');
+  }
+  if (!isClinicalRole(user.role)) return false;
+  const ownSpecialty = getClinicalSpecialty(user);
+  if (document.specialty && document.specialty !== ownSpecialty) return false;
+  return true;
+};
+
+export const canManagePatientDocument = (user: User | null | undefined, document: PatientDocument): boolean =>
+  canViewPatientDocument(user, document) && hasPermission(user, 'documents.manage');
+
 /** Permisos mínimos para cada ruta protegida. */
 export const ROUTE_PERMISSIONS: Record<string, Permission[]> = {
   '/appointments': ['agenda.view.own', 'agenda.view.all'],
@@ -129,6 +155,7 @@ export const ROUTE_PERMISSIONS: Record<string, Permission[]> = {
   '/professionals': ['professionals.manage'],
   '/settings': ['settings.manage'],
   '/audit': ['audit.view'],
+  '/document-templates': ['documents.templates.manage'],
   '/reservations': ['agenda.manage.all'],
   '/messages': ['messages.use'],
   '/system': ['settings.manage'],

@@ -41,6 +41,10 @@ export type Permission =
   | 'clinical.write.own'
   | 'clinical.view.all' // solo con autorización expresa en el perfil
   | 'clinical.consents.manage'
+  // Documentación legal y consentimientos
+  | 'documents.view'
+  | 'documents.manage'
+  | 'documents.templates.manage'
   // Economía y centro
   | 'billing.view'
   | 'billing.manage'
@@ -78,6 +82,14 @@ export interface LegalGuardian {
   relationship: string;
 }
 
+export type RepresentationType =
+  | 'patria_potestad_conjunta'
+  | 'patria_potestad_exclusiva'
+  | 'tutela'
+  | 'acogimiento'
+  | 'otro'
+  | 'no_consta';
+
 export type PatientStatus = 'activo' | 'inactivo' | 'archivado';
 
 export interface Patient {
@@ -99,6 +111,9 @@ export interface Patient {
   alerts?: string[];
   allergies?: string[];
   legalGuardian?: LegalGuardian | null;
+  secondaryLegalGuardian?: LegalGuardian | null;
+  representationType?: RepresentationType | null;
+  guardianshipNotes?: string;
   administrativeNotes?: string;
   assignedSpecialties?: ClinicalSpecialty[];
   demo?: boolean;
@@ -247,6 +262,381 @@ export interface ConsentRecord {
   createdAt: string;
   demo?: boolean;
 }
+
+// ------------------------------------------------------------
+// Documentación legal, consentimientos y firma electrónica
+// ------------------------------------------------------------
+
+export type DocumentCategory =
+  | 'privacidad'
+  | 'psicologia'
+  | 'fisioterapia'
+  | 'nutricion'
+  | 'logopedia'
+  | 'menores'
+  | 'general';
+
+export type DocumentTemplateLegalStatus = 'pendiente_revision' | 'aprobada' | 'retirada';
+
+export type DocumentTemplateFieldType =
+  | 'text'
+  | 'textarea'
+  | 'date'
+  | 'number'
+  | 'select'
+  | 'checkbox'
+  | 'dni'
+  | 'email';
+
+export type DocumentAutoFillKey =
+  | 'patient.fullName'
+  | 'patient.firstName'
+  | 'patient.lastName'
+  | 'patient.dni'
+  | 'patient.birthDate'
+  | 'patient.age'
+  | 'patient.address'
+  | 'patient.phone'
+  | 'patient.email'
+  | 'guardian.name'
+  | 'guardian.dni'
+  | 'guardian.phone'
+  | 'guardian.email'
+  | 'guardian.relationship'
+  | 'guardian2.name'
+  | 'guardian2.dni'
+  | 'guardian2.phone'
+  | 'guardian2.email'
+  | 'guardian2.relationship'
+  | 'representation.type'
+  | 'professional.name'
+  | 'professional.email'
+  | 'professional.phone'
+  | 'service.name'
+  | 'center.name'
+  | 'center.legalName'
+  | 'center.cif'
+  | 'center.address'
+  | 'center.phone'
+  | 'center.email'
+  | 'center.dpoName'
+  | 'center.dpoEmail'
+  | 'document.date'
+  | 'document.version';
+
+export interface DocumentTemplateField {
+  key: string;
+  label: string;
+  type: DocumentTemplateFieldType;
+  required: boolean;
+  /** Si existe, el valor se obtiene de la ficha y no se inventa. */
+  autoFill?: DocumentAutoFillKey | null;
+  /** Los campos automáticos de identidad no se pueden sobrescribir desde el generador. */
+  editable?: boolean;
+  options?: string[];
+  placeholder?: string;
+  help?: string;
+  /** No se muestra en la vista previa resumida, pero sí en el documento. */
+  sensitive?: boolean;
+}
+
+export type DocumentSignerRule =
+  | 'patient_adult'
+  | 'guardian_or_patient_16'
+  | 'guardian_only'
+  | 'guardian_both'
+  | 'patient_and_guardian'
+  | 'manual';
+
+export interface DocumentTemplate {
+  id: string;
+  name: string;
+  category: DocumentCategory;
+  specialty?: ClinicalSpecialty | null;
+  description: string;
+  /** Texto con marcadores {{campo}} y bloques condicionales {{#if campo}}...{{/if}}. */
+  body: string;
+  fields: DocumentTemplateField[];
+  version: number;
+  active: boolean;
+  legalStatus: DocumentTemplateLegalStatus;
+  legalReviewedBy?: string | null;
+  legalReviewedAt?: string | null;
+  legalReviewNotes?: string;
+  requiresSignature: boolean;
+  signerRule: DocumentSignerRule;
+  validityDays?: number | null;
+  required?: boolean;
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: string | null;
+  demo?: boolean;
+}
+
+export type PatientDocumentStatus =
+  | 'borrador'
+  | 'pendiente_revision'
+  | 'listo_para_enviar'
+  | 'enviado'
+  | 'pendiente_firma'
+  | 'firmado'
+  | 'rechazado'
+  | 'enlace_caducado'
+  | 'envio_fallido'
+  | 'firma_fallida'
+  | 'revocado'
+  | 'sustituido'
+  | 'fuera_vigencia'
+  | 'entregado'
+  | 'archivado';
+
+export type SignatureCondition =
+  | 'paciente'
+  | 'representante_legal'
+  | 'representante_legal_2'
+  | 'tutor'
+  | 'profesional'
+  | 'otro';
+
+export type SignatureAssurance =
+  | 'demo_sin_validez'
+  | 'simple_verificada_otp'
+  | 'avanzada_proveedor'
+  | 'cualificada_proveedor'
+  | 'firma_manual_externa';
+
+export type DocumentSignerStatus = 'pendiente' | 'enviado' | 'firmado' | 'rechazado' | 'revocado' | 'error';
+
+export interface DocumentSigner {
+  id: string;
+  name: string;
+  email: string;
+  condition: SignatureCondition;
+  required: boolean;
+  status: DocumentSignerStatus;
+  isMinor?: boolean;
+  authorityConfirmed?: boolean;
+  requestId?: string | null;
+  sentAt?: string | null;
+  signedAt?: string | null;
+  verificationMethod?: string | null;
+  assurance?: SignatureAssurance | null;
+  evidence?: Record<string, any> | null;
+}
+
+export interface DocumentEvidence {
+  sha256: string;
+  signedSha256?: string | null;
+  signedAt?: string | null;
+  signedByName?: string | null;
+  signedByCondition?: SignatureCondition | null;
+  verificationMethod?: string | null;
+  assurance?: SignatureAssurance | null;
+  provider?: string | null;
+  providerReference?: string | null;
+  integrityVerified?: boolean;
+  certificateInfo?: Record<string, any> | null;
+  signatures?: Array<Record<string, any>>;
+  userAgent?: string | null;
+  ipHint?: string | null;
+  archiveVersion?: number;
+}
+
+export interface PatientDocument {
+  id: string;
+  patientId: string;
+  templateId?: string | null;
+  templateName: string;
+  templateVersion: number;
+  category: DocumentCategory;
+  specialty?: ClinicalSpecialty | null;
+  professionalId?: string | null;
+  professionalName?: string | null;
+  serviceId?: string | null;
+  serviceName?: string | null;
+  appointmentId?: string | null;
+  title: string;
+  status: PatientDocumentStatus;
+  version: number;
+  isCurrent: boolean;
+  replacesDocumentId?: string | null;
+  replacedByDocumentId?: string | null;
+  fields: Record<string, any>;
+  patientSnapshot: Record<string, any>;
+  professionalSnapshot: Record<string, any>;
+  centerSnapshot: Record<string, any>;
+  renderedText: string;
+  contentSha256: string;
+  signers: DocumentSigner[];
+  requiredSignatures: number;
+  signedCount: number;
+  signatureAssurance?: SignatureAssurance | null;
+  signatureProvider?: string | null;
+  evidence?: DocumentEvidence | null;
+  signedPdfPath?: string | null;
+  signedPdfSha256?: string | null;
+  signedPdfBase64?: string | null; // solo demostración local
+  generatedPdfPath?: string | null;
+  externalUpload?: boolean;
+  sentAt?: string | null;
+  viewedAt?: string | null;
+  signedAt?: string | null;
+  archivedAt?: string | null;
+  expiresAt?: string | null;
+  revokedAt?: string | null;
+  revocationReason?: string | null;
+  notes?: string;
+  createdBy?: string | null;
+  createdByName?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  demo?: boolean;
+}
+
+export type DocumentEventType =
+  | 'created'
+  | 'updated'
+  | 'reviewed'
+  | 'approved'
+  | 'ready'
+  | 'sent'
+  | 'otp_sent'
+  | 'accessed'
+  | 'otp_verified'
+  | 'signed'
+  | 'rejected'
+  | 'verified'
+  | 'archived'
+  | 'downloaded'
+  | 'revoked'
+  | 'superseded'
+  | 'expired'
+  | 'error'
+  | 'external_upload'
+  | 'delivered'
+  | 'deleted';
+
+export interface DocumentEvent {
+  id: string;
+  documentId: string;
+  patientId: string;
+  requestId?: string | null;
+  type: DocumentEventType;
+  actorId?: string | null;
+  actorName: string;
+  actorType: 'usuario' | 'firmante' | 'sistema' | 'proveedor';
+  detail: string;
+  metadata?: Record<string, any> | null;
+  ipHint?: string | null;
+  userAgent?: string | null;
+  createdAt: string;
+  demo?: boolean;
+}
+
+export type SignatureRequestStatus =
+  | 'pendiente'
+  | 'verificado'
+  | 'firmado'
+  | 'rechazado'
+  | 'caducado'
+  | 'revocado'
+  | 'error';
+
+export interface DocumentSignatureRequest {
+  id: string;
+  documentId: string;
+  patientId: string;
+  signerId: string;
+  recipientName: string;
+  recipientEmail: string;
+  condition: SignatureCondition;
+  tokenHash: string;
+  otpHash?: string | null;
+  otpExpiresAt?: string | null;
+  otpAttempts: number;
+  otpLastSentAt?: string | null;
+  verificationHash?: string | null;
+  verificationExpiresAt?: string | null;
+  verifiedAt?: string | null;
+  status: SignatureRequestStatus;
+  expiresAt: string;
+  sentAt: string;
+  sentCount: number;
+  openedAt?: string | null;
+  signedAt?: string | null;
+  rejectedAt?: string | null;
+  failureReason?: string | null;
+  signedPdfPath?: string | null;
+  signedPdfSha256?: string | null;
+  evidence?: Record<string, any> | null;
+  createdBy?: string | null;
+  createdAt: string;
+  demo?: boolean;
+}
+
+export interface DocumentSettings {
+  dpoName: string;
+  dpoEmail: string;
+  privacyEmail: string;
+  emailFrom: string;
+  signatureProvider: 'demo' | 'local_otp' | 'external';
+  signatureProviderLabel: string;
+  signatureLevel: SignatureAssurance;
+  linkTtlHours: number;
+  otpTtlMinutes: number;
+  otpMaxAttempts: number;
+  requireLegalReview: boolean;
+  lastLegalReviewAt?: string | null;
+  privacyNoticeVersion: string;
+  notes?: string;
+}
+
+export interface DocumentTemplateDraft {
+  id?: string;
+  name: string;
+  category: DocumentCategory;
+  specialty?: ClinicalSpecialty | null;
+  description: string;
+  body: string;
+  fields: DocumentTemplateField[];
+  version: number;
+  active: boolean;
+  legalStatus: DocumentTemplateLegalStatus;
+  legalReviewedBy?: string | null;
+  legalReviewedAt?: string | null;
+  legalReviewNotes?: string;
+  requiresSignature: boolean;
+  signerRule: DocumentSignerRule;
+  validityDays?: number | null;
+  required?: boolean;
+}
+
+export interface PublicSignatureDocument {
+  requestId: string;
+  documentId: string;
+  title: string;
+  category: DocumentCategory;
+  version: number;
+  recipientName: string;
+  recipientEmailMasked: string;
+  condition: SignatureCondition;
+  renderedText: string;
+  contentSha256: string;
+  expiresAt: string;
+  status: SignatureRequestStatus;
+  requiresOtp: boolean;
+  assurance: SignatureAssurance;
+  verificationMethod: string;
+  centerName: string;
+  providerLabel: string;
+  signerName?: string;
+  authorityRequired?: boolean;
+  minorWarning?: string | null;
+  signedAt?: string | null;
+  signedPdfSha256?: string | null;
+  isDemo: boolean;
+}
+
 
 // ------------------------------------------------------------
 // Administración económica
@@ -402,6 +792,7 @@ export interface CenterSettings {
   aiEnabled: boolean;
   aiPrivacyReviewed: boolean;
   lastBackupAt?: string | null;
+  documentSettings?: DocumentSettings;
 }
 
 export interface Notification {

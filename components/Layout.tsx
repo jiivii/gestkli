@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Activity, CalendarDays, Users, Wallet, Settings, UserCog, ClipboardList, Sparkles,
   MessageSquare, LogOut, Menu, X, Bell, ChevronRight, Wrench, BarChart3, Inbox,
-  HeartPulse, Apple, MessageCircle, Brain, ShieldCheck, CircleHelp, Database,
+  HeartPulse, Apple, MessageCircle, Brain, ShieldCheck, CircleHelp, Database, FileCheck2,
 } from 'lucide-react';
 import { User, UserRole, Notification } from '../types';
 import { getProfessionalLabel, getRoleProfile, isClinicalRole } from '../constants';
@@ -90,6 +90,7 @@ const Layout: React.FC<LayoutProps> = ({ children, user, onLogout }) => {
           label: 'Sistema',
           items: [
             { name: 'Mensajes internos', path: '/messages', icon: <MessageSquare size={19} />, section: 'Sistema' },
+            { name: 'Plantillas legales', path: '/document-templates', icon: <FileCheck2 size={19} />, section: 'Sistema' },
             { name: 'Configuración', path: '/settings', icon: <Settings size={19} />, section: 'Sistema' },
             { name: 'Auditoría', path: '/audit', icon: <ShieldCheck size={19} />, section: 'Sistema' },
           ],

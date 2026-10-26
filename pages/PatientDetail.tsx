@@ -6,12 +6,12 @@ import {
   MapPin, Phone, Plus, ReceiptText, ShieldCheck, Stethoscope, UserCog, UserPlus, Users,
 } from 'lucide-react';
 import {
-  Appointment, AppointmentStatus, ClinicalRecord, ClinicalSpecialty, ConsentRecord,
-  Invoice, MedicalHistoryEntry, Patient, Payment, User, UserRole,
+  Appointment, AppointmentStatus, ClinicalRecord, ClinicalSpecialty,
+  Invoice, MedicalHistoryEntry, Patient, PatientDocument, Payment, User, UserRole,
 } from '../types';
 import { dbService } from '../services/dbService';
 import {
-  canViewSpecialty, canWriteSpecialty, hasPermission, isAdmin, visibleClinicalSpecialties,
+  canViewPatientDocument, canViewSpecialty, canWriteSpecialty, hasPermission, isAdmin, visibleClinicalSpecialties,
 } from '../services/permissions';
 import {
   ADMIN_STATE_COLORS, ADMIN_STATE_LABELS, APPOINTMENT_STATUS_COLORS, APPOINTMENT_STATUS_LABELS,
@@ -26,17 +26,9 @@ import ClinicalRecordModal from '../components/clinical/ClinicalRecordModal';
 import ClinicalReportModal from '../components/clinical/ClinicalReportModal';
 import ClinicalEvolution from '../components/clinical/ClinicalEvolution';
 import { ObjectiveProgress } from '../components/clinical/shared';
+import PatientDocumentsPanel from '../components/documents/PatientDocumentsPanel';
 
 interface Props { user: User; }
-
-const consentTypes: { value: ConsentRecord['type']; label: string }[] = [
-  { value: 'privacidad', label: 'Privacidad y protección de datos' },
-  { value: 'clinico', label: 'Consentimiento informado clínico' },
-  { value: 'menores', label: 'Representación legal de menor' },
-  { value: 'coordinacion', label: 'Coordinación con terceros' },
-  { value: 'imagen', label: 'Uso de imagen' },
-  { value: 'grabacion', label: 'Grabación de sesiones' },
-];
 
 const PatientDetail: React.FC<Props> = ({ user }) => {
   const { id } = useParams<{ id: string }>();
@@ -46,7 +38,7 @@ const PatientDetail: React.FC<Props> = ({ user }) => {
   const [patient, setPatient] = useState<Patient | null>(null);
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [records, setRecords] = useState<ClinicalRecord[]>([]);
-  const [consents, setConsents] = useState<ConsentRecord[]>([]);
+  const [documents, setDocuments] = useState<PatientDocument[]>([]);
   const [history, setHistory] = useState<MedicalHistoryEntry[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
@@ -62,15 +54,12 @@ const PatientDetail: React.FC<Props> = ({ user }) => {
   const [reportSpecialty, setReportSpecialty] = useState<ClinicalSpecialty | null>(null);
   const [reportBase, setReportBase] = useState<ClinicalRecord | null>(null);
 
-  const [consentOpen, setConsentOpen] = useState(false);
-  const [consentForm, setConsentForm] = useState<Partial<ConsentRecord>>({ type: 'clinico', signed: true });
   const [assignOpen, setAssignOpen] = useState(false);
   const [assignProfessional, setAssignProfessional] = useState('');
   const [saving, setSaving] = useState(false);
 
   const admin = isAdmin(user);
   const specialties = visibleClinicalSpecialties(user);
-  const canManageConsents = hasPermission(user, 'clinical.consents.manage');
   const canBill = hasPermission(user, 'billing.view');
   const canAssign = hasPermission(user, 'patients.assign');
   const minor = patient ? isMinor(patient.birthDate) : false;
@@ -84,15 +73,15 @@ const PatientDetail: React.FC<Props> = ({ user }) => {
       if (!found) { setError('No se encontró la ficha del paciente o no tienes acceso.'); setLoading(false); return; }
       setPatient(found);
 
-      const [appts, cons, hist, profs, assigns] = await Promise.all([
+      const [appts, hist, profs, assigns, docs] = await Promise.all([
         dbService.getAppointmentsByPatient(id),
-        dbService.getConsents(id),
         dbService.getHistoryByPatient(id),
         dbService.getProfessionals(),
         dbService.getAssignments(id),
+        dbService.getPatientDocuments(id),
       ]);
       setAppointments(appts);
-      setConsents(cons);
+      setDocuments(docs.filter(doc => canViewPatientDocument(user, doc)));
       setHistory(hist);
       setProfessionals(profs.filter(p => p.role !== UserRole.ADMIN));
       setAssignments(assigns);
@@ -147,22 +136,6 @@ const PatientDetail: React.FC<Props> = ({ user }) => {
   const invoiceFor = (appointmentId: string) => invoices.find(i => i.appointmentId === appointmentId);
   const clinicalRecordFor = (appointmentId: string) => records.find(r => r.appointmentId === appointmentId);
 
-  const saveConsent = async () => {
-    if (!patient) return;
-    if (!consentForm.title) { setError('Indica el título del consentimiento.'); return; }
-    setSaving(true);
-    try {
-      await dbService.saveConsent({ ...consentForm, patientId: patient.id }, user);
-      setConsentOpen(false);
-      setConsentForm({ type: 'clinico', signed: true });
-      await load();
-    } catch (e: any) {
-      setError(e?.message || 'No se pudo guardar el consentimiento.');
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const doAssign = async () => {
     if (!patient || !assignProfessional) return;
     const prof = professionals.find(p => p.id === assignProfessional);
@@ -194,7 +167,7 @@ const PatientDetail: React.FC<Props> = ({ user }) => {
     { id: 'resumen', label: 'Resumen', icon: ClipboardList },
     ...specialties.map(s => ({ id: `clinical-${s}`, label: SPECIALTY_LABELS[s], icon: s === UserRole.PSICOLOGIA ? HeartPulse : Stethoscope, count: recordsBySpecialty(s).length })),
     { id: 'agenda', label: 'Agenda', icon: CalendarDays, count: appointments.length },
-    { id: 'documents', label: 'Documentos', icon: FileCheck2, count: consents.length },
+    { id: 'documents', label: 'Documentación', icon: FileCheck2, count: documents.filter(d => d.isCurrent).length },
     ...(admin ? [{ id: 'admin', label: 'Administración', icon: ReceiptText }] : []),
   ];
 
@@ -326,18 +299,24 @@ const PatientDetail: React.FC<Props> = ({ user }) => {
           </SectionCard>
         )}
 
-        <SectionCard title="Consentimientos" description={`${consents.filter(c => c.signed).length} firmados de ${consents.length}`}>
+        <SectionCard
+          title="Documentación y consentimientos"
+          description={`${documents.filter(d => ['firmado', 'archivado', 'entregado'].includes(d.status)).length} completado(s) · ${documents.filter(d => d.isCurrent).length} vigente(s)`}
+        >
           <div className="space-y-2">
-            {consents.slice(0, 4).map(c => (
-              <div key={c.id} className="flex items-start gap-2">
-                {c.signed ? <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-fisio-600" /> : <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-500" />}
+            {documents.filter(d => d.isCurrent).slice(0, 4).map(doc => (
+              <div key={doc.id} className="flex items-start gap-2">
+                {['firmado', 'archivado', 'entregado'].includes(doc.status)
+                  ? <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-fisio-600" />
+                  : <AlertTriangle size={14} className="mt-0.5 shrink-0 text-amber-500" />}
                 <div className="min-w-0">
-                  <p className="truncate text-[11px] font-semibold text-stone-700">{c.title}</p>
-                  <p className="text-[10px] text-stone-400">{c.signed ? `Firmado ${formatDate(c.date)}` : 'Pendiente'}</p>
+                  <p className="truncate text-[11px] font-semibold text-stone-700">{doc.title}</p>
+                  <p className="text-[10px] text-stone-400">{doc.status === 'firmado' ? `Firmado ${formatDate(doc.signedAt || doc.updatedAt)}` : doc.status === 'entregado' ? `Entregado ${formatDate(doc.sentAt || doc.updatedAt)}` : 'Pendiente o en revisión'}</p>
                 </div>
               </div>
             ))}
-            <button onClick={() => setTab('documents')} className="text-[11px] font-semibold text-stone-500 hover:text-stone-800">Gestionar documentos →</button>
+            {!documents.length && <p className="text-[11px] text-stone-500">Sin documentos registrados en el módulo nuevo.</p>}
+            <button onClick={() => setTab('documents')} className="text-[11px] font-semibold text-stone-500 hover:text-stone-800">Gestionar documentación →</button>
           </div>
         </SectionCard>
       </div>
@@ -449,67 +428,7 @@ const PatientDetail: React.FC<Props> = ({ user }) => {
   );
 
   const renderDocuments = () => (
-    <div className="space-y-4">
-      {minor && (
-        <InlineAlert level={consents.some(c => c.type === 'menores' && c.signed) ? 'success' : 'warning'} title="Protección del menor">
-          {consents.some(c => c.type === 'menores' && c.signed)
-            ? 'Consta autorización de representación legal. Revisa también la coordinación con terceros.'
-            : 'Falta la autorización de representación legal. No se debe iniciar el tratamiento sin ella.'}
-        </InlineAlert>
-      )}
-      <SectionCard
-        title="Consentimientos y documentos"
-        description="Trazabilidad de firmas, representación legal y autorizaciones"
-        actions={canManageConsents ? <button onClick={() => setConsentOpen(true)} className={btnPrimary}><Plus size={15} /> Añadir</button> : undefined}
-        padded={false}
-      >
-        {consents.length === 0 ? (
-          <EmptyState icon={FileCheck2} title="Sin documentos" description="Registra el consentimiento de privacidad y el consentimiento clínico." />
-        ) : (
-          <div className="divide-y divide-stone-100">
-            {consents.map(c => (
-              <div key={c.id} className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center">
-                <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${c.signed ? 'bg-fisio-50 text-fisio-700' : 'bg-amber-50 text-amber-700'}`}>
-                  {c.signed ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold text-stone-800">{c.title}</p>
-                  <p className="text-[11px] text-stone-400">
-                    {consentTypes.find(t => t.value === c.type)?.label || c.type}
-                    {c.guardianName ? ` · Representante: ${c.guardianName}` : ''}
-                    {c.date ? ` · ${formatDate(c.date)}` : ''}
-                    {c.expiresAt ? ` · Caduca ${formatDate(c.expiresAt)}` : ''}
-                  </p>
-                  {c.notes && <p className="mt-0.5 text-[11px] text-stone-500">{c.notes}</p>}
-                </div>
-                <Badge className={c.signed ? 'border-fisio-200 bg-fisio-50 text-fisio-800' : 'border-amber-200 bg-amber-50 text-amber-800'}>
-                  {c.signed ? 'Firmado' : 'Pendiente'}
-                </Badge>
-              </div>
-            ))}
-          </div>
-        )}
-      </SectionCard>
-
-      <SectionCard title="Política de privacidad" description="Estado del consentimiento administrativo">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-sm text-stone-600">
-            {patient.privacyPolicySigned ? 'Consta consentimiento de privacidad firmado.' : 'No consta consentimiento de privacidad firmado.'}
-          </p>
-          {canManageConsents && (
-            <button
-              onClick={async () => {
-                await dbService.updatePatientPrivacy(patient.id, !patient.privacyPolicySigned);
-                await load();
-              }}
-              className={btnSecondary + ' text-xs'}
-            >
-              Marcar como {patient.privacyPolicySigned ? 'pendiente' : 'firmado'}
-            </button>
-          )}
-        </div>
-      </SectionCard>
-    </div>
+    <PatientDocumentsPanel patient={patient} user={user} />
   );
 
   const renderAdmin = () => (
@@ -659,40 +578,6 @@ const PatientDetail: React.FC<Props> = ({ user }) => {
           onSaved={load}
         />
       )}
-
-      <Modal
-        open={consentOpen}
-        onClose={() => setConsentOpen(false)}
-        title="Añadir consentimiento"
-        subtitle={patientFullName(patient)}
-        accent="bg-slate-700"
-        footer={
-          <>
-            <button onClick={() => setConsentOpen(false)} className={btnGhost} disabled={saving}>Cancelar</button>
-            <button onClick={saveConsent} className={btnPrimary} disabled={saving}>{saving ? 'Guardando…' : 'Guardar'}</button>
-          </>
-        }
-      >
-        <div className="space-y-3">
-          <Field label="Tipo de documento">
-            <select className={inputClass} value={consentForm.type} onChange={e => setConsentForm({ ...consentForm, type: e.target.value as ConsentRecord['type'], title: consentTypes.find(t => t.value === e.target.value)?.label || '' })}>
-              {consentTypes.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-            </select>
-          </Field>
-          <Field label="Título" required><input className={inputClass} value={consentForm.title || ''} onChange={e => setConsentForm({ ...consentForm, title: e.target.value })} /></Field>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Field label="Fecha"><input type="date" className={inputClass} value={consentForm.date || ''} onChange={e => setConsentForm({ ...consentForm, date: e.target.value })} /></Field>
-            <Field label="Caducidad (opcional)"><input type="date" className={inputClass} value={consentForm.expiresAt || ''} onChange={e => setConsentForm({ ...consentForm, expiresAt: e.target.value })} /></Field>
-            <Field label="Firmado por"><input className={inputClass} value={consentForm.signedBy || ''} onChange={e => setConsentForm({ ...consentForm, signedBy: e.target.value })} /></Field>
-            <Field label="Representante legal"><input className={inputClass} value={consentForm.guardianName || ''} onChange={e => setConsentForm({ ...consentForm, guardianName: e.target.value })} /></Field>
-          </div>
-          <label className="flex items-center gap-2 text-sm text-stone-600">
-            <input type="checkbox" className="accent-stone-800" checked={consentForm.signed !== false} onChange={e => setConsentForm({ ...consentForm, signed: e.target.checked })} />
-            Documento firmado
-          </label>
-          <Field label="Notas"><textarea className={`${inputClass} resize-y`} rows={2} value={consentForm.notes || ''} onChange={e => setConsentForm({ ...consentForm, notes: e.target.value })} /></Field>
-        </div>
-      </Modal>
 
       <Modal
         open={assignOpen}

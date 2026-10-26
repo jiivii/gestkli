@@ -17,6 +17,8 @@ import Settings from './pages/Settings';
 import Audit from './pages/Audit';
 import TeamChat from './pages/TeamChat';
 import SystemInfo from './pages/SystemInfo';
+import DocumentTemplates from './pages/DocumentTemplates';
+import SignDocument from './pages/SignDocument';
 import { dbService } from './services/dbService';
 import { User, UserRole, ClinicalSpecialty } from './types';
 import { canAccessRoute, canViewSpecialty, hasPermission } from './services/permissions';
@@ -96,38 +98,49 @@ function App() {
 
   return (
     <HashRouter>
-      <Layout user={user} onLogout={handleLogout}>
-        <Routes>
-          <Route path="/login" element={!user ? <Login onLogin={handleLogin} /> : <Navigate to="/" replace />} />
+      <Routes>
+        {/* La firma remota es pública: no debe quedar dentro del layout autenticado. */}
+        <Route path="/sign/:token" element={<SignDocument />} />
+        <Route
+          path="*"
+          element={
+            <Layout user={user} onLogout={handleLogout}>
+              <Routes>
+                <Route path="/login" element={!user ? <Login onLogin={handleLogin} /> : <Navigate to="/" replace />} />
 
-          <Route path="/" element={<Guard><Dashboard user={user!} /></Guard>} />
+                <Route path="/" element={<Guard><Dashboard user={user!} /></Guard>} />
 
-          <Route path="/clinical/:specialty" element={<SpecialtyRoute />} />
+                <Route path="/clinical/:specialty" element={<SpecialtyRoute />} />
 
-          <Route path="/patients" element={<Guard permissionPath="/patients"><Patients user={user!} /></Guard>} />
-          <Route path="/patient/:id" element={<Guard><PatientDetail user={user!} /></Guard>} />
+                <Route path="/patients" element={<Guard permissionPath="/patients"><Patients user={user!} /></Guard>} />
+                <Route path="/patient/:id" element={<Guard><PatientDetail user={user!} /></Guard>} />
 
-          <Route path="/appointments" element={<Guard permissionPath="/appointments"><Appointments user={user!} /></Guard>} />
+                <Route path="/appointments" element={<Guard permissionPath="/appointments"><Appointments user={user!} /></Guard>} />
 
-          <Route path="/billing" element={<Guard permissionPath="/billing"><Billing user={user!} /></Guard>} />
-          <Route path="/accounting" element={<Navigate to="/billing" replace />} />
+                <Route path="/billing" element={<Guard permissionPath="/billing"><Billing user={user!} /></Guard>} />
+                <Route path="/accounting" element={<Navigate to="/billing" replace />} />
 
-          <Route path="/services" element={<Guard permissionPath="/services"><Services user={user!} /></Guard>} />
-          <Route path="/reports" element={<Guard permissionPath="/reports"><Reports user={user!} /></Guard>} />
+                <Route path="/services" element={<Guard permissionPath="/services"><Services user={user!} /></Guard>} />
+                <Route path="/reports" element={<Guard permissionPath="/reports"><Reports user={user!} /></Guard>} />
 
-          <Route path="/professionals" element={<Guard permissionPath="/professionals"><Professionals user={user!} /></Guard>} />
-          <Route path="/reservations" element={<Guard permissionPath="/reservations"><ReservationRequests user={user!} /></Guard>} />
+                <Route path="/professionals" element={<Guard permissionPath="/professionals"><Professionals user={user!} /></Guard>} />
+                <Route path="/reservations" element={<Guard permissionPath="/reservations"><ReservationRequests user={user!} /></Guard>} />
 
-          <Route path="/settings" element={<Guard permissionPath="/settings"><Settings user={user!} /></Guard>} />
-          <Route path="/audit" element={<Guard permissionPath="/audit"><Audit user={user!} /></Guard>} />
-          <Route path="/system" element={<Guard permissionPath="/system"><SystemInfo /></Guard>} />
+                <Route path="/document-templates" element={<Guard permissionPath="/document-templates"><DocumentTemplates user={user!} /></Guard>} />
 
-          <Route path="/messages" element={<Guard allowed={hasPermission(user, 'messages.use')}><TeamChat user={user!} /></Guard>} />
-          <Route path="/chat" element={<Navigate to="/messages" replace />} />
+                <Route path="/settings" element={<Guard permissionPath="/settings"><Settings user={user!} /></Guard>} />
+                <Route path="/audit" element={<Guard permissionPath="/audit"><Audit user={user!} /></Guard>} />
+                <Route path="/system" element={<Guard permissionPath="/system"><SystemInfo /></Guard>} />
 
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </Layout>
+                <Route path="/messages" element={<Guard allowed={hasPermission(user, 'messages.use')}><TeamChat user={user!} /></Guard>} />
+                <Route path="/chat" element={<Navigate to="/messages" replace />} />
+
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </Layout>
+          }
+        />
+      </Routes>
     </HashRouter>
   );
 }
